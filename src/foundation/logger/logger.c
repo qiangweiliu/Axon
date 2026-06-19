@@ -211,7 +211,6 @@ void fw_log_shutdown(void)
 
 void _fw_log(fw_log_level_t lvl, const char *mod, const char *fmt, ...)
 {
-    if (!g_ctx) return;
     if (lvl < g_ctx->global_lvl) return;
 
     fw_log_level_t eff = g_ctx->global_lvl;
