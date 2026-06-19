@@ -346,7 +346,6 @@ static int threadpool_deinit(framework_module_t *mod)
     .ctx     = NULL,
     .id      = 0,
     .next    = NULL,
-    .priority = PRIORITY_INFRA + 0,
 };
 
-MODULE_REGISTER(threadpool_mod);
+MODULE_REGISTER(threadpool_mod, LAYER_INFRA, 0);

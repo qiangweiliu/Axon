@@ -123,7 +123,6 @@ static int memory_stop(framework_module_t *mod)
     .ctx      = NULL,
     .id       = 0,
     .next     = NULL,
-    .priority = PRIORITY_BUSINESS + 0,
 };
 
-MODULE_REGISTER(memory_mod);
+MODULE_REGISTER(memory_mod, LAYER_BUSINESS, 0);

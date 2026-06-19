@@ -466,7 +466,6 @@ static int config_start(framework_module_t *mod)
 framework_module_t config_mod = {
     .name     = "config",
     .version  = 0x00010000,
-    .priority = PRIORITY_CORE + 1,
     
     .state    = FRAMEWORK_STATE_UNLOADED,
     .init     = config_init,
@@ -479,4 +478,4 @@ framework_module_t config_mod = {
     .next     = NULL,
 };
 
-MODULE_REGISTER(config_mod);
+MODULE_REGISTER(config_mod, LAYER_CORE, 1);

@@ -256,7 +256,6 @@ static int logger_start(struct framework_module *m) { (void)m; LOG_INFO("Logger:
     .name = "logger", .version = 0x00010000,  .state = 0,
     .init = logger_init, .start = logger_start,
     .loop = NULL, .stop = NULL, .deinit = NULL, .ctx = NULL,
-    .priority = PRIORITY_CORE + 0,
 };
 
-MODULE_REGISTER(logger_mod);
+MODULE_REGISTER(logger_mod, LAYER_CORE, 0);

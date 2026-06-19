@@ -789,6 +789,5 @@ void agent_set_prompt_file(const char *path)
     .state = FRAMEWORK_STATE_UNLOADED, .init = agent_loop_init,
     .start = agent_loop_start, .loop = agent_loop_tick,
     .stop = NULL, .deinit = NULL, .ctx = NULL, .id = 0, .next = NULL,
-    .priority = PRIORITY_APP + 0,
 };
-MODULE_REGISTER(agent_loop_mod);
+MODULE_REGISTER(agent_loop_mod, LAYER_APP, 0);

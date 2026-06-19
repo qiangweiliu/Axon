@@ -231,7 +231,6 @@ static int tool_manager_deinit(framework_module_t *mod)
     .ctx      = NULL,
     .id       = 0,
     .next     = NULL,
-    .priority = PRIORITY_BUSINESS + 1,
 };
 
-MODULE_REGISTER(tool_manager_mod);
+MODULE_REGISTER(tool_manager_mod, LAYER_BUSINESS, 1);

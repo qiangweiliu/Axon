@@ -385,6 +385,5 @@ static int llm_client_stop(framework_module_t *mod)
     .start = llm_client_start, .loop = NULL,
     .stop = llm_client_stop, .deinit = NULL,
     .ctx = NULL, .id = 0, .next = NULL,
-    .priority = PRIORITY_BUSINESS + 2,
 };
-MODULE_REGISTER(llm_client_mod);
+MODULE_REGISTER(llm_client_mod, LAYER_BUSINESS, 2);

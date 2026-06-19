@@ -49,36 +49,40 @@ typedef struct framework_module {
  *
  * Modules place a pointer to their framework_module_t in the .agent_modules
  * ELF section. framework_discover_modules() scans the section at init time.
- * The module's .priority field determines init order (higher = earlier).
+ * Priority is auto-computed from layer + offset — no manual .priority needed.
  *
- * Priority convention (use named constants in struct definition):
- *   PRIORITY_CORE     = 900  (logger, config)
- *   PRIORITY_INFRA    = 700  (threadpool, http_client)
- *   PRIORITY_BUSINESS = 400  (memory, tool_manager, llm_client)
- *   PRIORITY_APP      = 100  (agent_loop)
- *   Add offset within layer: .priority = PRIORITY_APP + 5;
+ * Layer → base priority (higher = earlier init):
+ *   LAYER_CORE     (3) →  900  (logger, config)
+ *   LAYER_INFRA    (2) →  700  (threadpool, http_client)
+ *   LAYER_BUSINESS (1) →  400  (memory, tool_manager, llm_client)
+ *   LAYER_APP      (0) →  100  (agent_loop)
+ *
+ * Offset: order within the layer (0..99).
+ * Priority = layer * 300 + 100 + offset.
  * ========================================================================= */
 
 void _fw_module_register(framework_module_t *mod);
 
-#define PRIORITY_APP       100
-#define PRIORITY_BUSINESS  400
-#define PRIORITY_INFRA     700
-#define PRIORITY_CORE      900
+#define LAYER_APP      0
+#define LAYER_BUSINESS 1
+#define LAYER_INFRA    2
+#define LAYER_CORE     3
 
-/* Generic: place a typed pointer into a named ELF section.
-   section_name: string literal (without leading dot), e.g. "llm_models"
-   type:         pointer target type, e.g. const llm_model_t
-   var:          variable/instance to register. */
+/* Generic: place a typed pointer into a named ELF section. */
 #define AGENT_SECTION(section_name, type, var) \
     __attribute__((section("." section_name), used)) \
     type *_ag_sec_##var = &var
 
-/* Register a framework module.
-   The module struct's .priority field (set by PRIORITY_* + offset)
-   determines init order via framework_sort_modules(). */
-#define MODULE_REGISTER(mod) \
-    AGENT_SECTION("agent_modules", framework_module_t, mod)
+/* Register a module with layer-based priority.
+   layer:  LAYER_APP(0) .. LAYER_CORE(3), see constants above.
+   offset: sub-priority within the layer (0..99).
+   The macro computes priority = layer * 300 + 100 + offset and
+   sets mod.priority via a minimal constructor (runs before main).
+   Do NOT set .priority in the struct — the macro overrides it. */
+#define MODULE_REGISTER(mod, layer, offset) \
+    AGENT_SECTION("agent_modules", framework_module_t, mod); \
+    __attribute__((constructor(65535))) \
+    static void _ag_set_prio_##mod(void) { mod.priority = (layer) * 300 + 100 + (offset); }
 
 /* =========================================================================
  * 4. Lifecycle API

@@ -437,7 +437,6 @@ static int http_client_start(framework_module_t *mod)
     .start    = http_client_start,
     .loop     = NULL, .stop = NULL, .deinit = NULL,
     .ctx      = NULL, .id = 0, .next = NULL,
-    .priority = PRIORITY_INFRA + 1,
 };
 
-MODULE_REGISTER(http_client_mod);
+MODULE_REGISTER(http_client_mod, LAYER_INFRA, 1);
