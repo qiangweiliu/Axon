@@ -392,8 +392,9 @@ static int handle_ask(const char *question, char *out, size_t out_len)
     }
 
     uint64_t t0 = os_clock_ms();
-    llm_response_t *resp = llm_chat(endpoint, api_key, model,
-                                           final_prompt);
+    llm_response_t *resp = llm_chat_stream(endpoint, api_key, model,
+                                           final_prompt,
+                                           on_llm_token, NULL);
     uint64_t elapsed = os_clock_ms() - t0;
 
     g_spinner_on = 0;
@@ -402,20 +403,6 @@ static int handle_ask(const char *question, char *out, size_t out_len)
     if (!resp) {
         if (out) os_snprintf(out, out_len, RED "%% LLM unavailable" RST);
         return -1;
-    }
-
-    /* Print non-streaming response with \n escaping */
-    if (resp->content) {
-        for (const char *p = resp->content; *p; p++) {
-            if (*p == '\\' && (*(p+1) == 'n' || *(p+1) == 'N')) {
-                os_printf("\n");
-                p++;
-            } else {
-                os_printf("%c", *p);
-            }
-        }
-        os_printf("\n");
-        fflush(stdout);
     }
 
     resp->latency_ms = elapsed;
