@@ -55,7 +55,7 @@ static void print_answer_top(void)
 
 static void print_answer_bottom(void)
 {
-    os_printf("╰");
+    os_printf("\n╰");
     BOX_FILL("─", 0, 0);
     os_printf("╯\n");
 }
