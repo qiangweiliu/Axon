@@ -5,6 +5,12 @@
  *   framework-driven: loop() reads prompt.txt, processes, logs results.
  *   interactive:      repl() reads stdin, displays responses to stdout.
  *
+ * Memory system (Hermes-style):
+ *   MEMORY.md — agent's persistent notes (2200 chars limit)
+ *   USER.md   — user profile (1375 chars limit)
+ *   Entries separated by "\n§\n", injected into system prompt on ask.
+ *   Commands: note, profile, notes, replace, forget
+ *
  * Terminal UI inspired by Hermes Agent CLI.
  */
 
@@ -16,6 +22,8 @@
 #include "llm_client.h"
 #include "config.h"
 #include "agent_loop.h"
+#include "memfile.h"
+#include "input.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -35,20 +43,25 @@
 #define BLU  "\033[34m"
 #define RED  "\033[31m"
 
+/* ── Persistent memory files (Hermes-style) ───────────────────────── */
+
+#define MEMFILE_MEMORY_LIMIT  2200
+#define MEMFILE_USER_LIMIT    1375
+
+static memfile_t g_mem;    /* agent notes  (memories/memory.md) */
+static memfile_t g_user;   /* user profile (memories/user.md)   */
+
 /* ── Globals ──────────────────────────────────────────────────────── */
 
 static char g_prompt_path[256] = PROMPT_PATH_DEFAULT;
 static int  g_tick_count;
 
+/* Session-wide token tracking */
+static int g_session_tokens;
+
 /* ── Terminal Helpers ─────────────────────────────────────────────── */
 
 #define LINE_WIDTH 60
-
-static void print_sep(char c)
-{
-    for (int i = 0; i < LINE_WIDTH; i++) os_printf("%c", c);
-    os_printf("\n");
-}
 
 /* ── Spinner ──────────────────────────────────────────────────────── */
 
@@ -117,7 +130,169 @@ static int handle_recall(const char *query, char *out, size_t out_len)
     return 0;
 }
 
-/* Token callback — first token stops spinner, then prints on a new line */
+/* ── Hermes-style bounded memory commands ─────────────────────────── */
+
+static void handle_note(const char *text, char *out, size_t out_len)
+{
+    if (!text || !*text) return;
+    if (memfile_add(&g_mem, text) != 0) {
+        if (out) os_snprintf(out, out_len,
+            RED "%% memory full" RST " — use " GRY "forget" RST " to free space");
+        return;
+    }
+    memfile_save(&g_mem);
+    char usage[64];
+    memfile_usage(&g_mem, usage, sizeof(usage));
+    if (out) os_snprintf(out, out_len, GRY "✓ noted  (%s)" RST, usage);
+}
+
+static void handle_profile(const char *text, char *out, size_t out_len)
+{
+    if (!text || !*text) return;
+    if (memfile_add(&g_user, text) != 0) {
+        if (out) os_snprintf(out, out_len,
+            RED "%% profile full" RST " — use " GRY "forget" RST " to free space");
+        return;
+    }
+    memfile_save(&g_user);
+    char usage[64];
+    memfile_usage(&g_user, usage, sizeof(usage));
+    if (out) os_snprintf(out, out_len, GRY "✓ profile saved  (%s)" RST, usage);
+}
+
+/*
+ * replace <key> <text>
+ * Find the memory entry containing <key> and replace its content.
+ * Targets memory (not profile). Use "forget -u" + "profile" for user edits.
+ */
+static void handle_replace(const char *args, char *out, size_t out_len)
+{
+    if (!args || !*args) return;
+
+    /* Split on first space: key = before, text = after */
+    const char *p = args;
+    while (*p && *p != ' ') p++;
+    if (*p != ' ') {
+        if (out) os_snprintf(out, out_len,
+            GRY "usage: replace <key> <new text>" RST);
+        return;
+    }
+
+    size_t key_len = (size_t)(p - args);
+    const char *text = p;
+    while (*text == ' ') text++;
+    if (!*text) {
+        if (out) os_snprintf(out, out_len,
+            GRY "usage: replace <key> <new text>" RST);
+        return;
+    }
+
+    char key_buf[256];
+    size_t kc = key_len < sizeof(key_buf) - 1
+                ? key_len : sizeof(key_buf) - 1;
+    os_memcpy(key_buf, args, kc);
+    key_buf[kc] = '\0';
+
+    if (memfile_replace(&g_mem, key_buf, text) == 0) {
+        memfile_save(&g_mem);
+        char usage[64];
+        memfile_usage(&g_mem, usage, sizeof(usage));
+        if (out) os_snprintf(out, out_len,
+            GRY "✓ replaced  (%s)" RST, usage);
+    } else {
+        if (out) os_snprintf(out, out_len,
+            RED "%% replace failed" RST " — key not found or would exceed limit");
+    }
+}
+
+/*
+ * forget [-m|-u] <substring>
+ *   -m  : remove from memory only (default if omitted, i.e. both)
+ *   -u  : remove from user profile only
+ * Default (no flag): remove from both
+ */
+static void handle_forget(const char *raw, char *out, size_t out_len)
+{
+    if (!raw || !*raw) {
+        if (out) os_snprintf(out, out_len,
+            GRY "usage: forget [-m|-u] <substring>" RST);
+        return;
+    }
+
+    int do_mem  = 0;
+    int do_user = 0;
+    const char *sub = raw;
+
+    /* Parse optional flag */
+    if (*raw == '-') {
+        if (raw[1] == 'm' && (raw[2] == ' ' || raw[2] == '\0')) {
+            do_mem = 1;
+            sub = raw[2] ? raw + 3 : "";
+        } else if (raw[1] == 'u' && (raw[2] == ' ' || raw[2] == '\0')) {
+            do_user = 1;
+            sub = raw[2] ? raw + 3 : "";
+        } else {
+            if (out) os_snprintf(out, out_len,
+                GRY "usage: forget [-m|-u] <substring>" RST);
+            return;
+        }
+    } else {
+        do_mem = 1;
+        do_user = 1;
+    }
+
+    while (*sub == ' ') sub++;
+    if (!*sub) {
+        if (out) os_snprintf(out, out_len,
+            GRY "usage: forget [-m|-u] <substring>" RST);
+        return;
+    }
+
+    int total = 0;
+    if (do_mem) {
+        int rm = memfile_remove(&g_mem, sub);
+        if (rm > 0) memfile_save(&g_mem);
+        total += rm;
+    }
+    if (do_user) {
+        int ru = memfile_remove(&g_user, sub);
+        if (ru > 0) memfile_save(&g_user);
+        total += ru;
+    }
+
+    if (total > 0) {
+        if (out) os_snprintf(out, out_len,
+            GRY "✓ removed %d entry" RST, total);
+    } else {
+        if (out) os_snprintf(out, out_len,
+            GRY "nothing matched '%s'" RST, sub);
+    }
+}
+
+static void handle_notes(char *out, size_t out_len)
+{
+    char mu[64], uu[64];
+    memfile_usage(&g_mem, mu, sizeof(mu));
+    memfile_usage(&g_user, uu, sizeof(uu));
+
+    size_t pos = 0;
+    pos += os_snprintf(out + pos, out_len - pos,
+        BLD "Memory" RST "  (" GRY "%s" RST ")" "\n", mu);
+    for (int i = 0; i < g_mem.count && pos < out_len; i++) {
+        pos += os_snprintf(out + pos, out_len - pos,
+            "  " DIM "%d." RST " %s\n", i + 1, g_mem.entries[i]);
+    }
+    pos += os_snprintf(out + pos, out_len - pos,
+        BLD "Profile" RST " (" GRY "%s" RST ")" "\n", uu);
+    for (int i = 0; i < g_user.count && pos < out_len; i++) {
+        pos += os_snprintf(out + pos, out_len - pos,
+            "  " DIM "%d." RST " %s\n", i + 1, g_user.entries[i]);
+    }
+}
+
+/* ── LLM Ask ──────────────────────────────────────────────────────── */
+
+/* First token callback — stops spinner, shows response */
 static int g_first_token = 0;
 
 static void on_llm_token(const char *token, size_t len,
@@ -127,11 +302,19 @@ static void on_llm_token(const char *token, size_t len,
     (void)len; (void)tokens_so_far; (void)elapsed_ms; (void)user;
     if (!g_first_token) {
         g_first_token = 1;
-        g_spinner_on = 0;               /* stop spinner */
-        os_sleep_ms(300);                /* wait for spinner to finish its 250ms cycle */
-        os_printf("\n");                /* new line after prompt */
+        g_spinner_on = 0;
+        os_sleep_ms(300);
+        os_printf("\033[K");  /* clear the spinner line (keep prompt above) */
     }
-    os_printf("%s", token);
+    /* Convert literal \n to actual newlines */
+    for (const char *p = token; *p; p++) {
+        if (*p == '\\' && (*(p+1) == 'n' || *(p+1) == 'N')) {
+            os_printf("\n");
+            p++;
+        } else {
+            os_printf("%c", *p);
+        }
+    }
     fflush(stdout);
 }
 
@@ -149,12 +332,66 @@ static int handle_ask(const char *question, char *out, size_t out_len)
 
     g_spinner_on = 1;
     g_first_token = 0;
+    os_printf("\n");  /* new line: keep prompt visible above, spinner below */
+    fflush(stdout);
     os_thread_handle_t tid;
     os_thread_create(&tid, spinner_thread, NULL);
 
+    /* Build prompt: system instructions + memory context + user question */
+    char prompt_buf[8192];
+    const char *final_prompt = question;
+    {
+        int pos = 0;
+
+        /* System instructions: tell LLM it can persist memory via markers */
+        pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
+            "[System Instructions]\n"
+            "You have a persistent memory system. To save information across sessions,\n"
+            "append one of these directives at the END of your reply:\n"
+            "  [NOTE: <fact>]       — save a fact to persistent memory\n"
+            "  [PROFILE: <info>]    — save user profile information\n"
+            "  [FORGET: <keyword>]  — remove a memory entry containing keyword\n"
+            "Example: 'I'll remember that. [NOTE: User's birthday is Jan 1]'\n"
+            "Directives are hidden from the user; use them silently.\n"
+            "\n");
+
+        if (g_mem.count > 0 || g_user.count > 0) {
+            pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
+                "===== MEMORY =====\n");
+            if (g_mem.count > 0) {
+                for (int i = 0; i < g_mem.count; i++)
+                    pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
+                        "%s\n", g_mem.entries[i]);
+            }
+            if (g_user.count > 0) {
+                pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
+                    "===== PROFILE =====\n");
+                for (int i = 0; i < g_user.count; i++)
+                    pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
+                        "%s\n", g_user.entries[i]);
+            }
+            pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, "\n");
+        }
+
+        /* Flatten newlines to spaces to keep JSON valid */
+        for (int i = 0; i < pos; i++) {
+            if (prompt_buf[i] == '\n')
+                prompt_buf[i] = ' ';
+        }
+
+        /* Append question and flatten its newlines too */
+        size_t qlen = os_strlen(question);
+        for (size_t i = 0; i < qlen && pos < (int)sizeof(prompt_buf) - 1; i++) {
+            char c = question[i];
+            prompt_buf[pos++] = (c == '\n') ? ' ' : c;
+        }
+        prompt_buf[pos] = '\0';
+        final_prompt = prompt_buf;
+    }
+
     uint64_t t0 = os_clock_ms();
-    llm_response_t *resp = llm_chat_stream(endpoint, api_key, model,
-                                           question, on_llm_token, NULL);
+    llm_response_t *resp = llm_chat(endpoint, api_key, model,
+                                           final_prompt);
     uint64_t elapsed = os_clock_ms() - t0;
 
     g_spinner_on = 0;
@@ -165,9 +402,15 @@ static int handle_ask(const char *question, char *out, size_t out_len)
         return -1;
     }
 
+    /* Print non-streaming response */
+    if (resp->content) {
+        os_printf("%s\n", resp->content);
+        fflush(stdout);
+    }
+
     resp->latency_ms = elapsed;
 
-    /* Stats bar (dim, at bottom after the response) */
+    /* Stats bar */
     if (out) {
         size_t pos = 0;
         pos += os_snprintf(out + pos, out_len - pos,
@@ -179,10 +422,92 @@ static int handle_ask(const char *question, char *out, size_t out_len)
                 double tps = (double)resp->completion_tokens /
                              ((double)elapsed / 1000.0);
                 pos += os_snprintf(out + pos, out_len - pos,
-                                   " · %.1f tok/s", tps);
+                                   " · %.1f/s", tps);
             }
         }
+        /* Track session tokens */
+        int sess_add = resp->prompt_tokens + resp->completion_tokens;
+        if (sess_add > 0) {
+            g_session_tokens += sess_add;
+        }
+        /* Show memory usage if entries exist */
+        if (g_mem.count > 0 || g_user.count > 0) {
+            int mp = g_mem.limit > 0
+                     ? (g_mem.total_chars * 100 / g_mem.limit) : 0;
+            int up = g_user.limit > 0
+                     ? (g_user.total_chars * 100 / g_user.limit) : 0;
+            pos += os_snprintf(out + pos, out_len - pos,
+                               DIM " ‖ " RST);
+            if (g_mem.count > 0)
+                pos += os_snprintf(out + pos, out_len - pos,
+                                   DIM "mem %d%%" RST, mp);
+            if (g_user.count > 0)
+                pos += os_snprintf(out + pos, out_len - pos,
+                                   DIM " · you %d%%" RST, up);
+        }
         os_snprintf(out + pos, out_len - pos, RST);
+    }
+
+    /* Auto-log Q&A */
+    if (resp->content) {
+        os_file_handle_t lf = os_file_open("conversations.log", "a");
+        if (lf) {
+            char logline[4096];
+            int n = os_snprintf(logline, sizeof(logline),
+                "[%llu] Q: %s\nA: %s\n\n",
+                (unsigned long long)t0, question, resp->content);
+            if (n > 0) os_file_write(lf, logline, (size_t)n);
+            os_file_close(lf);
+        }
+
+        /* Parse memory directives from LLM response */
+        const char *p = resp->content;
+        while (p) {
+            const char *note_start = strstr(p, "[NOTE: ");
+            const char *prof_start = strstr(p, "[PROFILE: ");
+            const char *forg_start = strstr(p, "[FORGET: ");
+
+            /* Find earliest marker */
+            const char *earliest = NULL;
+            int kind = 0; /* 1=note, 2=profile, 3=forget */
+            int prefix_len = 0;
+
+            if (note_start && (!earliest || note_start < earliest))
+                { earliest = note_start; kind = 1; prefix_len = 7; }
+            if (prof_start && (!earliest || prof_start < earliest))
+                { earliest = prof_start; kind = 2; prefix_len = 10; }
+            if (forg_start && (!earliest || forg_start < earliest))
+                { earliest = forg_start; kind = 3; prefix_len = 9; }
+
+            if (!earliest) break;
+
+            const char *start = earliest + prefix_len;
+            const char *end = strstr(start, "]");
+            if (!end) break;
+
+            /* Extract content between [MARKER: and ] */
+            size_t clen = (size_t)(end - start);
+            if (clen > 0) {
+                char content[1024];
+                size_t cp = clen < sizeof(content) - 1 ? clen : sizeof(content) - 1;
+                os_memcpy(content, start, cp);
+                content[cp] = '\0';
+
+                char feedback[128];
+                if (kind == 1) {
+                    handle_note(content, feedback, sizeof(feedback));
+                } else if (kind == 2) {
+                    handle_profile(content, feedback, sizeof(feedback));
+                } else if (kind == 3) {
+                    handle_forget(content, feedback, sizeof(feedback));
+                }
+                /* Print feedback if non-empty */
+                if (feedback[0])
+                    os_printf(DIM "%s" RST "\n", feedback);
+            }
+
+            p = end + 1; /* continue after ] */
+        }
     }
 
     llm_response_free(resp);
@@ -195,25 +520,44 @@ static int process_line(const char *line, char *out, size_t out_len)
 {
     if (!line || !*line) return 0;
 
-    if (os_strncmp(line, "echo ", 5) == 0) {
+    if (os_strncmp(line, "note ", 5) == 0) {
+        handle_note(line + 5, out, out_len);
+    } else if (os_strncmp(line, "profile ", 8) == 0) {
+        handle_profile(line + 8, out, out_len);
+    } else if (os_strcmp(line, "notes") == 0) {
+        handle_notes(out, out_len);
+    } else if (os_strncmp(line, "replace ", 8) == 0) {
+        handle_replace(line + 8, out, out_len);
+    } else if (os_strncmp(line, "forget ", 7) == 0) {
+        handle_forget(line + 7, out, out_len);
+    } else if (os_strcmp(line, "forget") == 0) {
+        handle_forget("", out, out_len);
+    } else if (os_strncmp(line, "echo ", 5) == 0) {
         handle_echo(line + 5, out, out_len);
     } else if (os_strncmp(line, "remember ", 9) == 0) {
         handle_remember(line + 9, out, out_len);
     } else if (os_strncmp(line, "recall ", 7) == 0) {
         int n = handle_recall(line + 7, out, out_len);
-        if (n == 0 && out) os_snprintf(out, out_len, GRY "nothing found" RST);
+        if (n == 0 && out)
+            os_snprintf(out, out_len, GRY "nothing found" RST);
     } else if (os_strncmp(line, "ask ", 4) == 0) {
         return handle_ask(line + 4, out, out_len);
     } else if (os_strcmp(line, "help") == 0) {
         if (out) os_snprintf(out, out_len,
             BLU "  Commands:" RST "\n"
-            "  " GRN "ask" RST " <question>   — send to LLM\n"
-            "  " CYN "echo" RST " <msg>       — call echo tool\n"
-            "  " CYN "remember" RST " <text>  — store in memory\n"
-            "  " CYN "recall" RST " <query>   — search memory\n"
-            "  " GRY "help" RST "             — this help\n"
-            "  " GRY "exit" RST "             — quit");
-    } else if (os_strcmp(line, "exit") == 0 || os_strcmp(line, "quit") == 0) {
+            "  " GRN "ask" RST " <question>          — send to LLM\n"
+            "  " CYN "note" RST " <text>             — persistent memory (MEMORY.md)\n"
+            "  " CYN "profile" RST " <text>          — user profile (USER.md)\n"
+            "  " CYN "notes" RST "                     — list all memory entries\n"
+            "  " CYN "replace" RST " <key> <text>    — replace memory entry containing <key>\n"
+            "  " CYN "forget" RST " [-m|-u] <sub>    — remove by substring (both, -m mem, -u user)\n"
+            "  " CYN "echo" RST " <msg>               — call echo tool\n"
+            "  " CYN "remember" RST " <text>           — long-term DB memory\n"
+            "  " CYN "recall" RST " <query>            — search long-term DB\n"
+            "  " GRY "help" RST "                     — this help\n"
+            "  " GRY "exit" RST "                     — quit");
+    } else if (os_strcmp(line, "exit") == 0 ||
+               os_strcmp(line, "quit") == 0) {
         if (out) os_snprintf(out, out_len, "bye");
         return 1;
     } else {
@@ -233,8 +577,8 @@ static int   g_hist_pos;     /* -1 = new input, 0..count-1 = browsing */
 static void hist_push(const char *line)
 {
     if (!line || !*line) return;
-    /* Don't store duplicate of last entry */
-    if (g_hist_count > 0 && os_strcmp(g_hist[(g_hist_count-1) % HIST_MAX], line) == 0)
+    if (g_hist_count > 0 &&
+        os_strcmp(g_hist[(g_hist_count-1) % HIST_MAX], line) == 0)
         return;
     size_t len = os_strlen(line);
     if (len >= PROMPT_MAX) len = PROMPT_MAX - 1;
@@ -249,48 +593,56 @@ static void hist_push(const char *line)
 void agent_loop_repl(void)
 {
     const config_t *cfg = config_get();
-    const char *model = cfg && cfg->llm_model[0] ? cfg->llm_model : "gpt-4";
-    const char *ep    = cfg && cfg->llm_endpoint[0] ? cfg->llm_endpoint : "(unset)";
+    const char *model = cfg && cfg->llm_model[0]
+                        ? cfg->llm_model : "gpt-4";
+    const char *ep    = cfg && cfg->llm_endpoint[0]
+                        ? cfg->llm_endpoint : "(unset)";
+
+    /* Load persistent memory files */
+    memfile_load("memories/memory.md", &g_mem, MEMFILE_MEMORY_LIMIT);
+    memfile_load("memories/user.md",   &g_user, MEMFILE_USER_LIMIT);
+    g_session_tokens = 0;
+
+    char mu[64], uu[64];
+    memfile_usage(&g_mem, mu, sizeof(mu));
+    memfile_usage(&g_user, uu, sizeof(uu));
 
     /* ── Banner ── */
     os_printf(BLD BLU "┌" RST);
-    for (int i = 0; i < LINE_WIDTH - 2; i++) os_printf(BLD BLU "─" RST);
+    for (int i = 0; i < LINE_WIDTH - 2; i++)
+        os_printf(BLD BLU "─" RST);
     os_printf(BLD BLU "┐\n" RST);
     os_printf(BLD BLU "│" RST "  Axon  " DIM "·" RST "  %s\n", model);
     os_printf(BLD BLU "│" RST "  " GRY "%s" RST "\n", ep);
     os_printf(BLD BLU "├" RST);
     for (int i = 0; i < LINE_WIDTH - 2; i++) os_printf("─");
     os_printf(BLD BLU "┤\n" RST);
-    os_printf(BLD BLU "│" RST "  " GRN "ask" RST "  " DIM "·" RST "  " CYN "echo" RST
-              "  " DIM "·" RST "  " CYN "remember" RST "  " DIM "·" RST
-              "  " CYN "recall" RST "  " DIM "·" RST "  " GRY "help" RST "\n");
+    os_printf(BLD BLU "│" RST "  " CYN "mem"
+              RST " " GRY "%s" RST "  " CYN "you"
+              RST " " GRY "%s" RST "\n", mu, uu);
+    os_printf(BLD BLU "│" RST "  " GRN "ask" RST "  " DIM "·" RST
+              "  " CYN "note" RST "  " DIM "·" RST
+              "  " CYN "notes" RST "  " DIM "·" RST
+              "  " CYN "forget" RST "  " DIM "·" RST
+              "  " GRY "help" RST "\n");
     os_printf(BLD BLU "└" RST);
-    for (int i = 0; i < LINE_WIDTH - 2; i++) os_printf(BLD BLU "─" RST);
+    for (int i = 0; i < LINE_WIDTH - 2; i++)
+        os_printf(BLD BLU "─" RST);
     os_printf(BLD BLU "┘\n\n" RST);
 
     char line[PROMPT_MAX];
+    raw_on();
     for (;;) {
-        /* ── Prompt ── */
         os_printf(BLD GRN "┃> " RST);
         fflush(stdout);
 
-        /* ── Read line ── */
-        if (!fgets(line, sizeof(line), stdin)) {
-            os_printf("\n" GRY "EOF" RST "\n");
-            break;
-        }
+        int n = read_line_raw(line, PROMPT_MAX);
+        if (n < 0) { os_printf("\n" GRY "EOF" RST "\n"); break; }
 
-        /* Strip trailing \n */
-        size_t llen = strlen(line);
-        while (llen > 0 && (line[llen-1] == '\n' || line[llen-1] == '\r'))
-            line[--llen] = '\0';
-
-        /* Trim leading whitespace */
         char *t = line;
         while (*t == ' ' || *t == '\t') t++;
         if (!*t) continue;
 
-        /* ── Process ── */
         hist_push(t);
 
         char result[4096] = "";
@@ -304,6 +656,7 @@ void agent_loop_repl(void)
             os_printf("\n%s\n", result);
         }
     }
+    raw_off();
 }
 
 /* ── Framework-Driven Mode (prompt.txt) ───────────────────────────── */
@@ -312,6 +665,12 @@ static int agent_loop_init(framework_module_t *mod)
 {
     (void)mod;
     g_tick_count = 0;
+
+    /* Load persistent memory files */
+    memfile_load("memories/memory.md", &g_mem, MEMFILE_MEMORY_LIMIT);
+    memfile_load("memories/user.md",   &g_user, MEMFILE_USER_LIMIT);
+    g_session_tokens = 0;
+
     os_file_handle_t fh = os_file_open(g_prompt_path, "a");
     if (fh) os_file_close(fh);
     const config_t *cfg = config_get();
@@ -370,7 +729,7 @@ void agent_set_prompt_file(const char *path)
 }
 
 framework_module_t agent_loop_mod = {
-    .name = "agent_loop", .version = 0x00030000, .priority = 10,
+    .name = "agent_loop", .version = 0x00040000, .priority = 10,
     .state = FRAMEWORK_STATE_UNLOADED, .init = agent_loop_init,
     .start = agent_loop_start, .loop = agent_loop_tick,
     .stop = NULL, .deinit = NULL, .ctx = NULL, .id = 0, .next = NULL,

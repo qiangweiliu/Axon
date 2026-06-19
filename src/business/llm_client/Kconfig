@@ -1,5 +1,6 @@
 # Kconfig — LLM Client 模块配置
+# Core layer + model adapters
 
-MODULE_SRCS = llm_client.c
+MODULE_SRCS = llm_client.c model_deepseek.c model_agnes.c
 
 CFLAGS += -Isrc/business/llm_client

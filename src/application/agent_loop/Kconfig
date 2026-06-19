@@ -1,5 +1,5 @@
 # Kconfig — AgentLoop 模块配置
 
-MODULE_SRCS = agent_loop.c
+MODULE_SRCS = agent_loop.c memfile.c input.c
 
 CFLAGS += -Isrc/application/agent_loop

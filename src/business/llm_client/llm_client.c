@@ -1,146 +1,208 @@
 /*
- * llm_client.c — OpenAI-compatible chat completion client
+ * llm_client.c — LLM API client core layer
  *
- * Builds JSON request, calls http_post, extracts response content.
- * Minimal JSON parsing — no external library needed.
+ * Dispatches model-specific request building and response parsing
+ * to the selected model adapter (llm_core.h).
+ * Handles HTTPS communication, streaming SSE, and unified response type.
+ *
+ * Layers:
+ *   llm_client.c   ← core: HTTP, dispatch, public API
+ *   llm_core.h     ← adapter interface
+ *   model_*.c      ← per-model format handling
  */
 
 #include "agent_framework.h"
 #include "framework_internal.h"
 #include "os_api.h"
-#include "http_client.h"
 #include "llm_client.h"
+#include "llm_core.h"
+#include "http_client.h"
+#include <string.h>
 
-#define BUF_SIZE 16384
+#define BUF_SIZE    16384
 
-/* ── URL Parse ────────────────────────────────────────────────────── */
+/* ── Model discovery via .llm_models section scan ──────────────────── */
+
+/* Symbols injected by linker script agent.ld */
+extern const llm_model_t *__start___llm_models[];
+extern const llm_model_t *__stop___llm_models[];
+
+static const llm_model_t *g_default_model = NULL;
+
+void llm_model_discover(void)
+{
+    size_t count = (size_t)(__stop___llm_models - __start___llm_models);
+    for (size_t i = 0; i < count; i++) {
+        const llm_model_t *m = __start___llm_models[i];
+        if (!m) continue;
+        if (!g_default_model) g_default_model = m;
+        LOG_INFO("LLM: model '%s' registered (%s)", m->name, m->build_body ? "ready" : "broken");
+    }
+    if (!g_default_model)
+        LOG_WARN("LLM: no model adapters registered");
+}
+
+const llm_model_t* llm_model_select(const char *model_name)
+{
+    if (!model_name || !g_default_model) return g_default_model;
+    size_t count = (size_t)(__stop___llm_models - __start___llm_models);
+    for (size_t i = 0; i < count; i++) {
+        const llm_model_t *m = __start___llm_models[i];
+        if (!m) continue;
+        if (os_strncmp(model_name, m->name,
+                       os_strlen(m->name)) == 0)
+            return m;
+    }
+    return g_default_model;
+}
+
+/* ── URL parsing ────────────────────────────────────────────────── */
 
 static int parse_url(const char *url, char *host, size_t host_len,
                      int *port, char *path, size_t path_len, int *is_https)
 {
-    if (!url || !host || !port || !path) return -1;
-
-    *is_https = 0;
+    if (!url || !host || !port || !path || !is_https) return -1;
     const char *p = url;
-    if (os_strncmp(p, "https://", 8) == 0) {
-        p += 8; *port = 443; *is_https = 1;
-    } else if (os_strncmp(p, "http://", 7) == 0) {
-        p += 7; *port = 80;
-    } else { return -1; }
 
-    const char *host_start = p;
-    while (*p && *p != ':' && *p != '/') p++;
-    size_t hlen = (size_t)(p - host_start);
-    if (hlen >= host_len) return -1;
-    os_memcpy(host, host_start, hlen); host[hlen] = '\0';
+    if (os_strncmp(p, "https://", 8) == 0)  { *is_https = 1; p += 8; }
+    else if (os_strncmp(p, "http://", 7) == 0) { *is_https = 0; p += 7; }
+    else return -1;
 
-    if (*p == ':') {
-        p++; *port = 0;
-        while (*p >= '0' && *p <= '9') { *port = *port * 10 + (*p - '0'); p++; }
-    }
-    if (*p == '/') {
-        size_t plen = os_strlen(p);
-        if (plen >= path_len) return -1;
-        os_memcpy(path, p, plen); path[plen] = '\0';
+    const char *colon = os_strchr(p, ':');
+    const char *slash = os_strchr(p, '/');
+    const char *host_end;
+
+    if (colon && (!slash || colon < slash)) {
+        host_end = colon;
+        *port = 0;
+        for (const char *c = colon + 1; *c >= '0' && *c <= '9'; c++)
+            *port = *port * 10 + (*c - '0');
+    } else if (slash) {
+        host_end = slash;
+        *port = *is_https ? 443 : 80;
     } else {
-        os_memcpy(path, "/", 2);
+        host_end = p + os_strlen(p);
+        *port = *is_https ? 443 : 80;
     }
+
+    size_t hlen = (size_t)(host_end - p);
+    if (hlen >= host_len) hlen = host_len - 1;
+    os_memcpy(host, p, hlen);
+    host[hlen] = '\0';
+
+    if (slash) {
+        size_t slen = os_strlen(slash);
+        if (slen >= path_len) slen = path_len - 1;
+        os_memcpy(path, slash, slen);
+        path[slen] = '\0';
+    } else {
+        path[0] = '/'; path[1] = '\0';
+    }
+
+    if (*port == 0) *port = *is_https ? 443 : 80;
     return 0;
 }
 
-/* ── JSON Builders ────────────────────────────────────────────────── */
+/* ── SSE Parser (streaming) ─────────────────────────────────────── */
 
-static int build_chat_body(char *buf, size_t buf_len,
-                           const char *model, const char *prompt)
+typedef struct {
+    char   buf[65536];
+    size_t pos;
+    char  *accumulated;
+    size_t accum_len;
+    size_t accum_cap;
+    int    tokens;
+    int    done;
+    int    prompt_tokens;
+    int    completion_tokens;
+    const llm_model_t *model;   /* adapter used for parsing */
+    llm_token_cb_t cb;
+    void  *cb_user;
+    uint64_t t0;
+} sse_parser_t;
+
+static void sse_feed(sse_parser_t *sp, const char *data, size_t len)
 {
-    char safe_prompt[BUF_SIZE];
-    size_t plen = os_strlen(prompt);
-    if (plen >= sizeof(safe_prompt)) plen = sizeof(safe_prompt) - 1;
-    for (size_t i = 0; i < plen; i++)
-        safe_prompt[i] = (prompt[i] == '"') ? '\'' : prompt[i];
-    safe_prompt[plen] = '\0';
+    const llm_model_t *m = sp->model;
+    for (size_t i = 0; i < len; i++) {
+        if (sp->pos >= sizeof(sp->buf) - 1) sp->pos = 0;
+        sp->buf[sp->pos++] = data[i];
+        sp->buf[sp->pos] = '\0';
 
-    return os_snprintf(buf, buf_len,
-        "{"
-        "\"model\":\"%s\","
-        "\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}]"
-        "}",
-        model, safe_prompt);
-}
-
-/* ── JSON Extractor ───────────────────────────────────────────────── */
-
-static char *extract_content(const char *json, size_t *out_len)
-{
-    const char *key = "\"content\":\"";
-    const char *start = NULL, *p = json;
-    while (*p) {
-        const char *k = key, *s = p;
-        while (*k && *s == *k) { s++; k++; }
-        if (!*k) { start = s; break; }
-        p++;
-    }
-    if (!start) return NULL;
-    const char *end = start;
-    while (*end && *end != '"') end++;
-    size_t len = (size_t)(end - start);
-    char *content = (char *)os_alloc(len + 1);
-    if (!content) return NULL;
-    os_memcpy(content, start, len);
-    content[len] = '\0';
-    if (out_len) *out_len = len;
-    return content;
-}
-
-static int extract_int_field(const char *json, const char *field)
-{
-    const char *p = json;
-    while (*p) {
-        const char *k = field, *s = p;
-        while (*k && *s == *k) { s++; k++; }
-        if (!*k) {
-            s--;
-            if (*s == '"') {
-                while (*s && *s != ':') s++;
-                if (*s == ':') s++;
-                while (*s == ' ' || *s == '\t') s++;
-                int n = 0;
-                while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; }
-                return n;
+        if (sp->pos >= 2 && sp->buf[sp->pos-1] == '\n' &&
+            sp->buf[sp->pos-2] == '\n') {
+            char *line = sp->buf;
+            while (line && *line && line < sp->buf + sp->pos) {
+                if (os_strncmp(line, "data: ", 6) == 0) {
+                    char *json = line + 6;
+                    char *end = json + os_strlen(json);
+                    while (end > json && (*end == '\n' || *end == '\r'))
+                        { *end = '\0'; end--; }
+                    if (os_strcmp(json, "[DONE]") == 0) { sp->done = 1; }
+                    else {
+                        char *content = m->extract_content(json, NULL);
+                        if (content && content[0]) {
+                            sp->tokens++;
+                            uint64_t elapsed = os_clock_ms() - sp->t0;
+                            if (sp->cb)
+                                sp->cb(content, os_strlen(content),
+                                       sp->tokens, elapsed, sp->cb_user);
+                            size_t clen = os_strlen(content);
+                            if (sp->accum_len + clen + 1 > sp->accum_cap) {
+                                sp->accum_cap = sp->accum_len + clen + 8192;
+                                char *nb = (char *)os_realloc(
+                                    sp->accumulated, sp->accum_cap);
+                                if (!nb) break;
+                                sp->accumulated = nb;
+                            }
+                            os_memcpy(sp->accumulated + sp->accum_len, content, clen);
+                            sp->accum_len += clen;
+                            sp->accumulated[sp->accum_len] = '\0';
+                            int ct = m->extract_int(json, "completion_tokens");
+                            if (ct > sp->completion_tokens) sp->completion_tokens = ct;
+                            int pt = m->extract_int(json, "prompt_tokens");
+                            if (pt > sp->prompt_tokens) sp->prompt_tokens = pt;
+                        }
+                        if (content) os_free(content);
+                    }
+                }
+                while (*line && *line != '\n') line++;
+                if (*line == '\n') line++;
             }
+            sp->pos = 0;
         }
-        p++;
     }
-    return 0;
 }
 
-/* ── Public API ───────────────────────────────────────────────────── */
+static void sse_callback(const char *data, size_t len, void *user)
+{
+    sse_feed((sse_parser_t *)user, data, len);
+}
+
+/* ── Non-streaming request (llm_chat) ───────────────────────────── */
 
 llm_response_t *llm_chat(const char *endpoint,
-                         const char *api_key,
-                         const char *model,
-                         const char *prompt)
+                          const char *api_key,
+                          const char *model,
+                          const char *prompt)
 {
     if (!endpoint || !model || !prompt) return NULL;
 
-    char host[256], path[512];
-    int port = 80, is_https = 0;
-
+    char host[256], path[512]; int port = 80, is_https = 0;
     if (parse_url(endpoint, host, sizeof(host), &port,
                   path, sizeof(path), &is_https) != 0) {
-        LOG_ERROR("LLM: bad endpoint '%s'", endpoint);
-        return NULL;
+        LOG_ERROR("LLM: bad endpoint '%s'", endpoint); return NULL;
     }
 
+    const llm_model_t *m = llm_model_select(model);
     char body[BUF_SIZE];
-    int blen = build_chat_body(body, sizeof(body), model, prompt);
+    int blen = m->build_body(body, sizeof(body), model, prompt, 0);
     if (blen <= 0 || blen >= (int)sizeof(body)) {
-        LOG_ERROR("LLM: body too large");
-        return NULL;
+        LOG_ERROR("LLM: body too large"); return NULL;
     }
 
-    LOG_INFO("LLM: POST %s:%d%s (%s) [%s]",
-             host, port, path, model, is_https ? "TLS" : "plain");
+    LOG_INFO("LLM: POST %s:%d%s (%s) [%s] via %s",
+             host, port, path, model, is_https ? "TLS" : "plain", m->name);
 
     /* Append /chat/completions */
     {
@@ -162,9 +224,19 @@ llm_response_t *llm_chat(const char *endpoint,
     char auth_hdr[256];
     if (api_key && api_key[0]) {
         os_snprintf(auth_hdr, sizeof(auth_hdr),
-                    "Authorization: Bearer %s\r\n", api_key);
+                    "Authorization: Bearer %s",
+                    api_key);
+        {
+            size_t _alen = os_strlen(auth_hdr);
+            if (_alen + 3 <= sizeof(auth_hdr)) {
+                auth_hdr[_alen] = '\r';
+                auth_hdr[_alen+1] = '\n';
+                auth_hdr[_alen+2] = '\0';
+            }
+        }
         extra = auth_hdr;
     }
+
 
     http_response_t *http;
     if (is_https) {
@@ -181,14 +253,12 @@ llm_response_t *llm_chat(const char *endpoint,
 
     llm_response_t *resp = (llm_response_t *)os_calloc(1, sizeof(*resp));
     if (!resp) { http_response_free(http); return NULL; }
-
-    resp->content = extract_content(http->body, &resp->content_len);
-    resp->prompt_tokens = extract_int_field(http->body, "prompt_tokens");
-    resp->completion_tokens = extract_int_field(http->body, "completion_tokens");
-    http_response_free(http);
-
-    if (!resp->content) { LOG_WARN("LLM: no content"); os_free(resp); return NULL; }
+    resp->content = m->extract_content(http->body, &resp->content_len);
+    resp->prompt_tokens = m->extract_int(http->body, "prompt_tokens");
+    resp->completion_tokens = m->extract_int(http->body, "completion_tokens");
+    if (!resp->content) { LOG_WARN("LLM: no content"); os_free(resp); http_response_free(http); return NULL; }
     LOG_INFO("LLM: response (%zu chars)", resp->content_len);
+    http_response_free(http);
     return resp;
 }
 
@@ -199,79 +269,7 @@ void llm_response_free(llm_response_t *resp)
     os_free(resp);
 }
 
-/* ── Streaming ────────────────────────────────────────────────────── */
-
-typedef struct {
-    char  buf[65536];
-    size_t pos;
-    char *accumulated;
-    size_t accum_len;
-    size_t accum_cap;
-    int    tokens;
-    int    done;
-    int    prompt_tokens;
-    int    completion_tokens;
-    llm_token_cb_t cb;
-    void  *cb_user;
-    uint64_t t0;
-} sse_parser_t;
-
-static void sse_feed(sse_parser_t *sp, const char *data, size_t len)
-{
-    for (size_t i = 0; i < len; i++) {
-        if (sp->pos >= sizeof(sp->buf) - 1) sp->pos = 0;
-        sp->buf[sp->pos++] = data[i];
-        sp->buf[sp->pos] = '\0';
-
-        if (sp->pos >= 2 && sp->buf[sp->pos-1] == '\n' &&
-            sp->buf[sp->pos-2] == '\n') {
-            char *line = sp->buf;
-            while (line && *line && line < sp->buf + sp->pos) {
-                if (os_strncmp(line, "data: ", 6) == 0) {
-                    char *json = line + 6;
-                    char *end = json + os_strlen(json);
-                    while (end > json && (*end == '\n' || *end == '\r'))
-                        { *end = '\0'; end--; }
-                    if (os_strcmp(json, "[DONE]") == 0) { sp->done = 1; }
-                    else {
-                        char *content = extract_content(json, NULL);
-                        if (content && content[0]) {
-                            sp->tokens++;
-                            uint64_t elapsed = os_clock_ms() - sp->t0;
-                            if (sp->cb)
-                                sp->cb(content, os_strlen(content),
-                                       sp->tokens, elapsed, sp->cb_user);
-                            size_t clen = os_strlen(content);
-                            if (sp->accum_len + clen + 1 > sp->accum_cap) {
-                                sp->accum_cap = sp->accum_len + clen + 8192;
-                                char *nb = (char *)os_realloc(
-                                    sp->accumulated, sp->accum_cap);
-                                if (!nb) break;
-                                sp->accumulated = nb;
-                            }
-                            os_memcpy(sp->accumulated + sp->accum_len, content, clen);
-                            sp->accum_len += clen;
-                            sp->accumulated[sp->accum_len] = '\0';
-                            int ct = extract_int_field(json, "completion_tokens");
-                            if (ct > sp->completion_tokens) sp->completion_tokens = ct;
-                            int pt = extract_int_field(json, "prompt_tokens");
-                            if (pt > sp->prompt_tokens) sp->prompt_tokens = pt;
-                        }
-                        if (content) os_free(content);
-                    }
-                }
-                while (*line && *line != '\n') line++;
-                if (*line == '\n') line++;
-            }
-            sp->pos = 0;
-        }
-    }
-}
-
-static void sse_callback(const char *data, size_t len, void *user)
-{
-    sse_feed((sse_parser_t *)user, data, len);
-}
+/* ── Streaming request (llm_chat_stream) ────────────────────────── */
 
 llm_response_t *llm_chat_stream(const char *endpoint,
                                 const char *api_key,
@@ -286,26 +284,15 @@ llm_response_t *llm_chat_stream(const char *endpoint,
         LOG_ERROR("LLM: bad endpoint '%s'", endpoint); return NULL;
     }
 
-    char safe_prompt[BUF_SIZE];
-    size_t plen = os_strlen(prompt);
-    if (plen >= sizeof(safe_prompt)) plen = sizeof(safe_prompt) - 1;
-    for (size_t i = 0; i < plen; i++)
-        safe_prompt[i] = (prompt[i] == '"') ? '\'' : prompt[i];
-    safe_prompt[plen] = '\0';
-
+    const llm_model_t *m = llm_model_select(model);
     char body[BUF_SIZE];
-    int blen = os_snprintf(body, sizeof(body),
-        "{"
-        "\"model\":\"%s\","
-        "\"messages\":[{\"role\":\"user\",\"content\":\"%s\"}],"
-        "\"stream\":true"
-        "}", model, safe_prompt);
+    int blen = m->build_body(body, sizeof(body), model, prompt, 1);
     if (blen <= 0 || blen >= (int)sizeof(body)) {
         LOG_ERROR("LLM: body too large"); return NULL;
     }
 
-    LOG_INFO("LLM: STREAM %s:%d%s (%s) [%s]",
-             host, port, path, model, is_https ? "TLS" : "plain");
+    LOG_INFO("LLM: STREAM %s:%d%s (%s) [%s] via %s",
+             host, port, path, model, is_https ? "TLS" : "plain", m->name);
 
     /* Append /chat/completions */
     {
@@ -324,9 +311,19 @@ llm_response_t *llm_chat_stream(const char *endpoint,
     char auth_hdr[256];
     if (api_key && api_key[0]) {
         os_snprintf(auth_hdr, sizeof(auth_hdr),
-                    "Authorization: Bearer %s\r\n", api_key);
+                    "Authorization: Bearer %s",
+                    api_key);
+        {
+            size_t _alen = os_strlen(auth_hdr);
+            if (_alen + 3 <= sizeof(auth_hdr)) {
+                auth_hdr[_alen] = '\r';
+                auth_hdr[_alen+1] = '\n';
+                auth_hdr[_alen+2] = '\0';
+            }
+        }
         extra = auth_hdr;
     }
+
 
     sse_parser_t sp;
     os_memset(&sp, 0, sizeof(sp));
@@ -334,6 +331,7 @@ llm_response_t *llm_chat_stream(const char *endpoint,
     sp.t0 = os_clock_ms();
     sp.accum_cap = 8192;
     sp.accumulated = (char *)os_alloc(sp.accum_cap);
+    sp.model = m;
     if (!sp.accumulated) return NULL;
     sp.accumulated[0] = '\0';
 
@@ -371,16 +369,23 @@ llm_response_t *llm_chat_stream(const char *endpoint,
 
 static int llm_client_init(framework_module_t *mod)
 {
-    (void)mod; LOG_INFO("LLM: init"); return 0;
+    (void)mod;
+    llm_model_discover();
+    LOG_INFO("LLM: init"); return 0;
 }
 static int llm_client_start(framework_module_t *mod)
 {
     (void)mod; LOG_INFO("LLM: ready"); return 0;
 }
+static int llm_client_stop(framework_module_t *mod)
+{
+    (void)mod; LOG_INFO("LLM: stop"); return 0;
+}
 framework_module_t llm_client_mod = {
-    .name = "llm_client", .version = 0x00010000, .priority = 350,
+    .name = "llm_client", .version = 0x00020000, .priority = 350,
     .state = FRAMEWORK_STATE_UNLOADED, .init = llm_client_init,
-    .start = llm_client_start, .loop = NULL, .stop = NULL,
-    .deinit = NULL, .ctx = NULL, .id = 0, .next = NULL,
+    .start = llm_client_start, .loop = NULL,
+    .stop = llm_client_stop, .deinit = NULL,
+    .ctx = NULL, .id = 0, .next = NULL,
 };
 MODULE_REGISTER(llm_client_mod);

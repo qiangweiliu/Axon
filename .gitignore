@@ -6,6 +6,8 @@ build/
 
 # Runtime
 agent.log
+conversations.log
+memories/
 prompt.txt
 data/
 

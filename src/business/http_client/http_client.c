@@ -23,6 +23,26 @@ static int atoi_simple(const char *s)
     return n;
 }
 
+/* Simple chunked transfer decoding: buf is modified in-place.
+   Returns length of decoded body (without chunk headers/trailers). */
+static size_t dechunk(char *buf)
+{
+    char *src = buf, *dst = buf;
+    while (*src) {
+        long size = 0;
+        while (*src >= '0' && *src <= '9') { size = size * 16 + (*src - '0'); src++; }
+        while (*src >= 'a' && *src <= 'f') { size = size * 16 + (*src - 'a' + 10); src++; }
+        while (*src >= 'A' && *src <= 'F') { size = size * 16 + (*src - 'A' + 10); src++; }
+        while (*src == '\r' || *src == '\n') src++;
+        if (size <= 0) break;
+        char *chunk_end = src + size;
+        while (src < chunk_end && *src) *dst++ = *src++;
+        while (*src == '\r' || *src == '\n') src++;
+    }
+    *dst = '\0';
+    return (size_t)(dst - buf);
+}
+
 static int str_case_prefix(const char *s, const char *prefix)
 {
     while (*prefix) {
@@ -81,15 +101,25 @@ static http_response_t *parse_response(char *buf, size_t total)
     if (!resp) return NULL;
     resp->status_code = status;
 
-    if (body_start && clen > 0) {
+    if (body_start) {
         size_t before_body = (size_t)(body_start - buf);
         size_t available = total - before_body;
-        size_t copy_len = (size_t)clen < available ? (size_t)clen : available;
-        resp->body = (char *)os_alloc(copy_len + 1);
-        if (resp->body) {
-            os_memcpy(resp->body, body_start, copy_len);
-            resp->body[copy_len] = '\0';
-            resp->body_len = copy_len;
+        size_t copy_len;
+
+        if (clen > 0) {
+            /* Content-Length based */
+            copy_len = (size_t)clen < available ? (size_t)clen : available;
+        } else {
+            /* Chunked or unknown — take everything after headers */
+            copy_len = available;
+            if (copy_len > 0) {
+                resp->body = (char *)os_alloc(copy_len + 1);
+                if (resp->body) {
+                    os_memcpy(resp->body, body_start, copy_len);
+                    resp->body[copy_len] = '\0';
+                    resp->body_len = dechunk(resp->body);
+                }
+            }
         }
     }
     return resp;
