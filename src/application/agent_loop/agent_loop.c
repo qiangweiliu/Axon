@@ -310,10 +310,10 @@ static void on_llm_token(const char *token, size_t len,
         os_printf("\033[K");  /* clear the spinner line */
     }
 
-    /* Transition from reasoning to content: 2 blank lines gap */
-    if (g_ctx->saw_reasoning && !is_reasoning) {
-        os_printf("\n\n");
-        g_ctx->saw_reasoning = 2;  /* mark gap done */
+    /* Transition from reasoning to content: 1 blank line gap */
+    if (g_ctx->saw_reasoning == 1 && !is_reasoning) {
+        os_printf("\n");
+        g_ctx->saw_reasoning = 0;  /* reset, gap done */
     }
     if (is_reasoning) g_ctx->saw_reasoning = 1;
 
