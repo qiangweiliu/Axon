@@ -333,10 +333,10 @@ static int threadpool_deinit(framework_module_t *mod)
     return 0;
 }
 
-framework_module_t threadpool_mod = {
+    framework_module_t threadpool_mod = {
     .name    = "threadpool",
     .version = 0x00010000,
-    .priority = 20,
+    
     .state   = FRAMEWORK_STATE_UNLOADED,
     .init    = threadpool_init,
     .start   = threadpool_start,
@@ -346,6 +346,7 @@ framework_module_t threadpool_mod = {
     .ctx     = NULL,
     .id      = 0,
     .next    = NULL,
+    .priority = PRIORITY_INFRA + 0,
 };
 
 MODULE_REGISTER(threadpool_mod);

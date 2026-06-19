@@ -49,23 +49,36 @@ typedef struct framework_module {
  *
  * Modules place a pointer to their framework_module_t in the .agent_modules
  * ELF section. framework_discover_modules() scans the section at init time.
- * This replaces __attribute__((constructor)), giving the framework full
- * control over module discovery order and timing.
+ * The module's .priority field determines init order (higher = earlier).
+ *
+ * Priority convention (use named constants in struct definition):
+ *   PRIORITY_CORE     = 900  (logger, config)
+ *   PRIORITY_INFRA    = 700  (threadpool, http_client)
+ *   PRIORITY_BUSINESS = 400  (memory, tool_manager, llm_client)
+ *   PRIORITY_APP      = 100  (agent_loop)
+ *   Add offset within layer: .priority = PRIORITY_APP + 5;
  * ========================================================================= */
 
 void _fw_module_register(framework_module_t *mod);
 
-/* Place a pointer in the .agent_modules section.
-   The pointer will be discovered by the section scanner at init. */
-#define AGENT_MOD_SECTION \
-    __attribute__((section(".agent_modules"), used))
+#define PRIORITY_APP       100
+#define PRIORITY_BUSINESS  400
+#define PRIORITY_INFRA     700
+#define PRIORITY_CORE      900
 
-/* Register a module: places &mod_instance in the .agent_modules section.
-   The module struct MUST be non-static (global or file-scope without static).
-   It will be auto-discovered by framework_discover_modules(). */
-#define MODULE_REGISTER(mod_instance) \
-    AGENT_MOD_SECTION \
-    framework_module_t *_fw_mod_ptr_##mod_instance = &mod_instance
+/* Generic: place a typed pointer into a named ELF section.
+   section_name: string literal (without leading dot), e.g. "llm_models"
+   type:         pointer target type, e.g. const llm_model_t
+   var:          variable/instance to register. */
+#define AGENT_SECTION(section_name, type, var) \
+    __attribute__((section("." section_name), used)) \
+    type *_ag_sec_##var = &var
+
+/* Register a framework module.
+   The module struct's .priority field (set by PRIORITY_* + offset)
+   determines init order via framework_sort_modules(). */
+#define MODULE_REGISTER(mod) \
+    AGENT_SECTION("agent_modules", framework_module_t, mod)
 
 /* =========================================================================
  * 4. Lifecycle API

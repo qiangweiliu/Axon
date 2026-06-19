@@ -252,10 +252,11 @@ const char *fw_log_get_module(void)
 static int logger_init(struct framework_module *m) { (void)m; LOG_INFO("Logger: init"); return 0; }
 static int logger_start(struct framework_module *m) { (void)m; LOG_INFO("Logger: ready"); return 0; }
 
-struct framework_module logger_mod = {
-    .name = "logger", .version = 0x00010000, .priority = 10, .state = 0,
+    struct framework_module logger_mod = {
+    .name = "logger", .version = 0x00010000,  .state = 0,
     .init = logger_init, .start = logger_start,
     .loop = NULL, .stop = NULL, .deinit = NULL, .ctx = NULL,
+    .priority = PRIORITY_CORE + 0,
 };
 
 MODULE_REGISTER(logger_mod);

@@ -428,15 +428,16 @@ static int http_client_start(framework_module_t *mod)
     return 0;
 }
 
-framework_module_t http_client_mod = {
+    framework_module_t http_client_mod = {
     .name     = "http_client",
     .version  = 0x00020000,
-    .priority = 300,
+    
     .state    = FRAMEWORK_STATE_UNLOADED,
     .init     = http_client_init,
     .start    = http_client_start,
     .loop     = NULL, .stop = NULL, .deinit = NULL,
     .ctx      = NULL, .id = 0, .next = NULL,
+    .priority = PRIORITY_INFRA + 1,
 };
 
 MODULE_REGISTER(http_client_mod);

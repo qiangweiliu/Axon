@@ -237,7 +237,6 @@ llm_response_t *llm_chat(const char *endpoint,
         extra = auth_hdr;
     }
 
-
     http_response_t *http;
     if (is_https) {
         http = https_post(host, port, path, "application/json", body, extra);
@@ -324,7 +323,6 @@ llm_response_t *llm_chat_stream(const char *endpoint,
         extra = auth_hdr;
     }
 
-
     sse_parser_t sp;
     os_memset(&sp, 0, sizeof(sp));
     sp.cb = on_token; sp.cb_user = user;
@@ -381,11 +379,12 @@ static int llm_client_stop(framework_module_t *mod)
 {
     (void)mod; LOG_INFO("LLM: stop"); return 0;
 }
-framework_module_t llm_client_mod = {
-    .name = "llm_client", .version = 0x00020000, .priority = 350,
+    framework_module_t llm_client_mod = {
+    .name = "llm_client", .version = 0x00020000, 
     .state = FRAMEWORK_STATE_UNLOADED, .init = llm_client_init,
     .start = llm_client_start, .loop = NULL,
     .stop = llm_client_stop, .deinit = NULL,
     .ctx = NULL, .id = 0, .next = NULL,
+    .priority = PRIORITY_BUSINESS + 2,
 };
 MODULE_REGISTER(llm_client_mod);

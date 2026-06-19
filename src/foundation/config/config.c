@@ -463,12 +463,11 @@ static int config_start(framework_module_t *mod)
     return 0;
 }
 
-/* Priority 25: inits before threadpool(20) and logger(10).
-   The two-pass pattern (stderr→config→file) is encapsulated here. */
 framework_module_t config_mod = {
     .name     = "config",
     .version  = 0x00010000,
-    .priority = 25,
+    .priority = PRIORITY_CORE + 1,
+    
     .state    = FRAMEWORK_STATE_UNLOADED,
     .init     = config_init,
     .start    = config_start,

@@ -1,8 +1,8 @@
 /* llm_core.h — Model adapter interface (llm_client core layer)
  *
  * Each model backend self-registers via LLM_MODEL_REGISTER macro,
- * which places a pointer in the .llm_models ELF section.
- * Core layer scans this section at startup to discover all models.
+ * built on the framework's generic AGENT_SECTION.
+ * Core layer scans the .llm_models section at startup.
  */
 
 #ifndef LLM_CORE_H
@@ -10,13 +10,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "agent_framework.h"
 
-/* Place a model pointer in .llm_models section for auto-discovery.
+/* Place a model adapter pointer in .llm_models section for auto-discovery.
    Usage — at bottom of each model_xxx.c:
      LLM_MODEL_REGISTER(my_adapter_instance); */
 #define LLM_MODEL_REGISTER(var) \
-    __attribute__((section(".llm_models"), used)) \
-    const llm_model_t *_llm_m_##var = &var
+    AGENT_SECTION("llm_models", const llm_model_t, var)
 
 /* Model adapter: one instance per model family */
 typedef struct {

@@ -110,10 +110,10 @@ static int memory_stop(framework_module_t *mod)
     return 0;
 }
 
-framework_module_t memory_mod = {
+    framework_module_t memory_mod = {
     .name     = "memory",
     .version  = 0x00010000,
-    .priority = 400,
+    
     .state    = FRAMEWORK_STATE_UNLOADED,
     .init     = memory_init,
     .start    = memory_start,
@@ -123,6 +123,7 @@ framework_module_t memory_mod = {
     .ctx      = NULL,
     .id       = 0,
     .next     = NULL,
+    .priority = PRIORITY_BUSINESS + 0,
 };
 
 MODULE_REGISTER(memory_mod);

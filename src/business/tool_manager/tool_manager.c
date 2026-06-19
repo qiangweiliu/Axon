@@ -218,10 +218,10 @@ static int tool_manager_deinit(framework_module_t *mod)
     return 0;
 }
 
-framework_module_t tool_manager_mod = {
+    framework_module_t tool_manager_mod = {
     .name     = "tool_manager",
     .version  = 0x00010000,
-    .priority = 380,
+    
     .state    = FRAMEWORK_STATE_UNLOADED,
     .init     = tool_manager_init,
     .start    = tool_manager_start,
@@ -231,6 +231,7 @@ framework_module_t tool_manager_mod = {
     .ctx      = NULL,
     .id       = 0,
     .next     = NULL,
+    .priority = PRIORITY_BUSINESS + 1,
 };
 
 MODULE_REGISTER(tool_manager_mod);
