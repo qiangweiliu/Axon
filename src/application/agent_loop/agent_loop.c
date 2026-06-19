@@ -48,16 +48,16 @@
 #define MEMFILE_MEMORY_LIMIT  2200
 #define MEMFILE_USER_LIMIT    1375
 
-static memfile_t g_mem;    /* agent notes  (memories/memory.md) */
-static memfile_t g_user;   /* user profile (memories/user.md)   */
+typedef struct {
+    memfile_t mem;
+    memfile_t user;
+    char prompt_path[256];
+    int  tick_count;
+    int  session_tokens;
+    int  first_token;
+} agent_loop_ctx_t;
 
-/* ── Globals ──────────────────────────────────────────────────────── */
-
-static char g_prompt_path[256] = PROMPT_PATH_DEFAULT;
-static int  g_tick_count;
-
-/* Session-wide token tracking */
-static int g_session_tokens;
+static agent_loop_ctx_t *g_ctx = NULL;
 
 /* ── Terminal Helpers ─────────────────────────────────────────────── */
 
@@ -135,28 +135,28 @@ static int handle_recall(const char *query, char *out, size_t out_len)
 static void handle_note(const char *text, char *out, size_t out_len)
 {
     if (!text || !*text) return;
-    if (memfile_add(&g_mem, text) != 0) {
+    if (memfile_add(&g_ctx->mem, text) != 0) {
         if (out) os_snprintf(out, out_len,
             RED "%% memory full" RST " — use " GRY "forget" RST " to free space");
         return;
     }
-    memfile_save(&g_mem);
+    memfile_save(&g_ctx->mem);
     char usage[64];
-    memfile_usage(&g_mem, usage, sizeof(usage));
+    memfile_usage(&g_ctx->mem, usage, sizeof(usage));
     if (out) os_snprintf(out, out_len, GRY "✓ noted  (%s)" RST, usage);
 }
 
 static void handle_profile(const char *text, char *out, size_t out_len)
 {
     if (!text || !*text) return;
-    if (memfile_add(&g_user, text) != 0) {
+    if (memfile_add(&g_ctx->user, text) != 0) {
         if (out) os_snprintf(out, out_len,
             RED "%% profile full" RST " — use " GRY "forget" RST " to free space");
         return;
     }
-    memfile_save(&g_user);
+    memfile_save(&g_ctx->user);
     char usage[64];
-    memfile_usage(&g_user, usage, sizeof(usage));
+    memfile_usage(&g_ctx->user, usage, sizeof(usage));
     if (out) os_snprintf(out, out_len, GRY "✓ profile saved  (%s)" RST, usage);
 }
 
@@ -193,10 +193,10 @@ static void handle_replace(const char *args, char *out, size_t out_len)
     os_memcpy(key_buf, args, kc);
     key_buf[kc] = '\0';
 
-    if (memfile_replace(&g_mem, key_buf, text) == 0) {
-        memfile_save(&g_mem);
+    if (memfile_replace(&g_ctx->mem, key_buf, text) == 0) {
+        memfile_save(&g_ctx->mem);
         char usage[64];
-        memfile_usage(&g_mem, usage, sizeof(usage));
+        memfile_usage(&g_ctx->mem, usage, sizeof(usage));
         if (out) os_snprintf(out, out_len,
             GRY "✓ replaced  (%s)" RST, usage);
     } else {
@@ -250,13 +250,13 @@ static void handle_forget(const char *raw, char *out, size_t out_len)
 
     int total = 0;
     if (do_mem) {
-        int rm = memfile_remove(&g_mem, sub);
-        if (rm > 0) memfile_save(&g_mem);
+        int rm = memfile_remove(&g_ctx->mem, sub);
+        if (rm > 0) memfile_save(&g_ctx->mem);
         total += rm;
     }
     if (do_user) {
-        int ru = memfile_remove(&g_user, sub);
-        if (ru > 0) memfile_save(&g_user);
+        int ru = memfile_remove(&g_ctx->user, sub);
+        if (ru > 0) memfile_save(&g_ctx->user);
         total += ru;
     }
 
@@ -272,36 +272,36 @@ static void handle_forget(const char *raw, char *out, size_t out_len)
 static void handle_notes(char *out, size_t out_len)
 {
     char mu[64], uu[64];
-    memfile_usage(&g_mem, mu, sizeof(mu));
-    memfile_usage(&g_user, uu, sizeof(uu));
+    memfile_usage(&g_ctx->mem, mu, sizeof(mu));
+    memfile_usage(&g_ctx->user, uu, sizeof(uu));
 
     size_t pos = 0;
     pos += os_snprintf(out + pos, out_len - pos,
         BLD "Memory" RST "  (" GRY "%s" RST ")" "\n", mu);
-    for (int i = 0; i < g_mem.count && pos < out_len; i++) {
+    for (int i = 0; i < g_ctx->mem.count && pos < out_len; i++) {
         pos += os_snprintf(out + pos, out_len - pos,
-            "  " DIM "%d." RST " %s\n", i + 1, g_mem.entries[i]);
+            "  " DIM "%d." RST " %s\n", i + 1, g_ctx->mem.entries[i]);
     }
     pos += os_snprintf(out + pos, out_len - pos,
         BLD "Profile" RST " (" GRY "%s" RST ")" "\n", uu);
-    for (int i = 0; i < g_user.count && pos < out_len; i++) {
+    for (int i = 0; i < g_ctx->user.count && pos < out_len; i++) {
         pos += os_snprintf(out + pos, out_len - pos,
-            "  " DIM "%d." RST " %s\n", i + 1, g_user.entries[i]);
+            "  " DIM "%d." RST " %s\n", i + 1, g_ctx->user.entries[i]);
     }
 }
 
 /* ── LLM Ask ──────────────────────────────────────────────────────── */
 
 /* First token callback — stops spinner, shows response */
-static int g_first_token = 0;
+
 
 static void on_llm_token(const char *token, size_t len,
                          int tokens_so_far, uint64_t elapsed_ms,
                          void *user)
 {
     (void)len; (void)tokens_so_far; (void)elapsed_ms; (void)user;
-    if (!g_first_token) {
-        g_first_token = 1;
+    if (!g_ctx->first_token) {
+        g_ctx->first_token = 1;
         g_spinner_on = 0;
         os_sleep_ms(300);
         os_printf("\033[K");  /* clear the spinner line (keep prompt above) */
@@ -331,7 +331,7 @@ static int handle_ask(const char *question, char *out, size_t out_len)
                            ? cfg->llm_model : "gpt-4";
 
     g_spinner_on = 1;
-    g_first_token = 0;
+    g_ctx->first_token = 0;
     os_printf("\n");  /* new line: keep prompt visible above, spinner below */
     fflush(stdout);
     os_thread_handle_t tid;
@@ -355,20 +355,20 @@ static int handle_ask(const char *question, char *out, size_t out_len)
             "Directives are hidden from the user; use them silently.\n"
             "\n");
 
-        if (g_mem.count > 0 || g_user.count > 0) {
+        if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
             pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
                 "===== MEMORY =====\n");
-            if (g_mem.count > 0) {
-                for (int i = 0; i < g_mem.count; i++)
+            if (g_ctx->mem.count > 0) {
+                for (int i = 0; i < g_ctx->mem.count; i++)
                     pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
-                        "%s\n", g_mem.entries[i]);
+                        "%s\n", g_ctx->mem.entries[i]);
             }
-            if (g_user.count > 0) {
+            if (g_ctx->user.count > 0) {
                 pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
                     "===== PROFILE =====\n");
-                for (int i = 0; i < g_user.count; i++)
+                for (int i = 0; i < g_ctx->user.count; i++)
                     pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
-                        "%s\n", g_user.entries[i]);
+                        "%s\n", g_ctx->user.entries[i]);
             }
             pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, "\n");
         }
@@ -436,20 +436,20 @@ static int handle_ask(const char *question, char *out, size_t out_len)
         /* Track session tokens */
         int sess_add = resp->prompt_tokens + resp->completion_tokens;
         if (sess_add > 0) {
-            g_session_tokens += sess_add;
+            g_ctx->session_tokens += sess_add;
         }
         /* Show memory usage if entries exist */
-        if (g_mem.count > 0 || g_user.count > 0) {
-            int mp = g_mem.limit > 0
-                     ? (g_mem.total_chars * 100 / g_mem.limit) : 0;
-            int up = g_user.limit > 0
-                     ? (g_user.total_chars * 100 / g_user.limit) : 0;
+        if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
+            int mp = g_ctx->mem.limit > 0
+                     ? (g_ctx->mem.total_chars * 100 / g_ctx->mem.limit) : 0;
+            int up = g_ctx->user.limit > 0
+                     ? (g_ctx->user.total_chars * 100 / g_ctx->user.limit) : 0;
             pos += os_snprintf(out + pos, out_len - pos,
                                DIM " ‖ " RST);
-            if (g_mem.count > 0)
+            if (g_ctx->mem.count > 0)
                 pos += os_snprintf(out + pos, out_len - pos,
                                    DIM "mem %d%%" RST, mp);
-            if (g_user.count > 0)
+            if (g_ctx->user.count > 0)
                 pos += os_snprintf(out + pos, out_len - pos,
                                    DIM " · you %d%%" RST, up);
         }
@@ -655,13 +655,13 @@ void agent_loop_repl(void)
                         ? cfg->llm_endpoint : "(unset)";
 
     /* Load persistent memory files */
-    memfile_load("memories/memory.md", &g_mem, MEMFILE_MEMORY_LIMIT);
-    memfile_load("memories/user.md",   &g_user, MEMFILE_USER_LIMIT);
-    g_session_tokens = 0;
+    memfile_load("memories/memory.md", &g_ctx->mem, MEMFILE_MEMORY_LIMIT);
+    memfile_load("memories/user.md",   &g_ctx->user, MEMFILE_USER_LIMIT);
+    g_ctx->session_tokens = 0;
 
     char mu[64], uu[64];
-    memfile_usage(&g_mem, mu, sizeof(mu));
-    memfile_usage(&g_user, uu, sizeof(uu));
+    memfile_usage(&g_ctx->mem, mu, sizeof(mu));
+    memfile_usage(&g_ctx->user, uu, sizeof(uu));
 
     /* ── Banner ── */
     os_printf(BLD BLU "┌" RST);
@@ -719,15 +719,17 @@ void agent_loop_repl(void)
 
 static int agent_loop_init(framework_module_t *mod)
 {
-    (void)mod;
-    g_tick_count = 0;
+    g_ctx = (agent_loop_ctx_t *)os_calloc(1, sizeof(agent_loop_ctx_t));
+    if (!g_ctx) return -1;
+    mod->ctx = g_ctx;
+    g_ctx->tick_count = 0;
 
     /* Load persistent memory files */
-    memfile_load("memories/memory.md", &g_mem, MEMFILE_MEMORY_LIMIT);
-    memfile_load("memories/user.md",   &g_user, MEMFILE_USER_LIMIT);
-    g_session_tokens = 0;
+    memfile_load("memories/memory.md", &g_ctx->mem, MEMFILE_MEMORY_LIMIT);
+    memfile_load("memories/user.md",   &g_ctx->user, MEMFILE_USER_LIMIT);
+    g_ctx->session_tokens = 0;
 
-    os_file_handle_t fh = os_file_open(g_prompt_path, "a");
+    os_file_handle_t fh = os_file_open(g_ctx->prompt_path, "a");
     if (fh) os_file_close(fh);
     const config_t *cfg = config_get();
     LOG_INFO("Agent: init (llm=%s, model=%s)",
@@ -744,10 +746,10 @@ static int agent_loop_start(framework_module_t *mod)
 static void agent_loop_tick(framework_module_t *mod)
 {
     (void)mod;
-    g_tick_count++;
-    if (g_tick_count < TICK_COOLDOWN) return;
+    g_ctx->tick_count++;
+    if (g_ctx->tick_count < TICK_COOLDOWN) return;
 
-    os_file_handle_t fh = os_file_open(g_prompt_path, "r");
+    os_file_handle_t fh = os_file_open(g_ctx->prompt_path, "r");
     if (!fh) return;
     char line[PROMPT_MAX];
     size_t pos = 0;
@@ -769,18 +771,18 @@ static void agent_loop_tick(framework_module_t *mod)
     }
     os_file_close(fh);
     if (processed > 0) {
-        os_file_handle_t out = os_file_open(g_prompt_path, "w");
+        os_file_handle_t out = os_file_open(g_ctx->prompt_path, "w");
         if (out) os_file_close(out);
     }
-    g_tick_count = 0;
+    g_ctx->tick_count = 0;
 }
 
 void agent_set_prompt_file(const char *path)
 {
     if (path) {
         size_t len = os_strlen(path);
-        if (len < sizeof(g_prompt_path))
-            { os_memcpy(g_prompt_path, path, len + 1); }
+        if (len < sizeof(g_ctx->prompt_path))
+            { os_memcpy(g_ctx->prompt_path, path, len + 1); }
     }
 }
 

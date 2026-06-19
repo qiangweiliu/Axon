@@ -19,7 +19,11 @@
 #define BUF_MAX         8192
 #define LINE_MAX        512
 
-static config_t g_config;
+typedef struct {
+    config_t cfg;
+} config_ctx_t;
+
+static config_ctx_t *g_ctx = NULL;
 
 /* ── String Helpers ───────────────────────────────────────────────── */
 
@@ -192,38 +196,38 @@ static void parse_line(char *line, void *user)
     if (os_strcmp(st->section, "logging") == 0) {
         if (os_strcmp(key, "file") == 0) {
             size_t vlen = os_strlen(val);
-            if (vlen < sizeof(g_config.log_file) && vlen > 0) {
-                os_memcpy(g_config.log_file, val, vlen);
-                g_config.log_file[vlen] = '\0';
+            if (vlen < sizeof(g_ctx->cfg.log_file) && vlen > 0) {
+                os_memcpy(g_ctx->cfg.log_file, val, vlen);
+                g_ctx->cfg.log_file[vlen] = '\0';
             } else {
-                g_config.log_file[0] = '\0';
+                g_ctx->cfg.log_file[0] = '\0';
             }
         } else if (os_strcmp(key, "level") == 0) {
-            g_config.log_level = parse_log_level(val);
+            g_ctx->cfg.log_level = parse_log_level(val);
         }
     }
     /* ── threadpool: ── */
     else if (os_strcmp(st->section, "threadpool") == 0) {
         if (os_strcmp(key, "workers") == 0) {
-            g_config.threadpool_workers = parse_int(val);
+            g_ctx->cfg.threadpool_workers = parse_int(val);
         }
     }
     /* ── llm: ── */
     else if (os_strcmp(st->section, "llm") == 0) {
         if (os_strcmp(key, "endpoint") == 0) {
             size_t vlen = os_strlen(val);
-            if (vlen < sizeof(g_config.llm_endpoint)) {
-                os_memcpy(g_config.llm_endpoint, val, vlen + 1);
+            if (vlen < sizeof(g_ctx->cfg.llm_endpoint)) {
+                os_memcpy(g_ctx->cfg.llm_endpoint, val, vlen + 1);
             }
         } else if (os_strcmp(key, "api_key") == 0) {
             size_t vlen = os_strlen(val);
-            if (vlen < sizeof(g_config.llm_api_key)) {
-                os_memcpy(g_config.llm_api_key, val, vlen + 1);
+            if (vlen < sizeof(g_ctx->cfg.llm_api_key)) {
+                os_memcpy(g_ctx->cfg.llm_api_key, val, vlen + 1);
             }
         } else if (os_strcmp(key, "model") == 0) {
             size_t vlen = os_strlen(val);
-            if (vlen < sizeof(g_config.llm_model)) {
-                os_memcpy(g_config.llm_model, val, vlen + 1);
+            if (vlen < sizeof(g_ctx->cfg.llm_model)) {
+                os_memcpy(g_ctx->cfg.llm_model, val, vlen + 1);
             }
         }
     }
@@ -232,13 +236,13 @@ static void parse_line(char *line, void *user)
 static int parse_config(const char *path)
 {
     /* Defaults */
-    g_config.log_file[0] = '\0';
-    os_memcpy(g_config.log_file, "agent.log", 10);
-    g_config.log_level   = FW_LOG_INFO;
-    g_config.threadpool_workers = 0;
-    g_config.llm_endpoint[0] = '\0';
-    g_config.llm_api_key[0]  = '\0';
-    g_config.llm_model[0]    = '\0';
+    g_ctx->cfg.log_file[0] = '\0';
+    os_memcpy(g_ctx->cfg.log_file, "agent.log", 10);
+    g_ctx->cfg.log_level   = FW_LOG_INFO;
+    g_ctx->cfg.threadpool_workers = 0;
+    g_ctx->cfg.llm_endpoint[0] = '\0';
+    g_ctx->cfg.llm_api_key[0]  = '\0';
+    g_ctx->cfg.llm_model[0]    = '\0';
 
     os_file_handle_t fh = os_file_open(path, "r");
     if (!fh) {
@@ -266,9 +270,9 @@ static int parse_config(const char *path)
 
     LOG_INFO("Config: loaded '%s'", path);
     LOG_INFO("  log.file   = '%s'",
-             g_config.log_file[0] ? g_config.log_file : "(stderr)");
-    LOG_INFO("  log.level  = %d", g_config.log_level);
-    LOG_INFO("  tp.workers = %d", g_config.threadpool_workers);
+             g_ctx->cfg.log_file[0] ? g_ctx->cfg.log_file : "(stderr)");
+    LOG_INFO("  log.level  = %d", g_ctx->cfg.log_level);
+    LOG_INFO("  tp.workers = %d", g_ctx->cfg.threadpool_workers);
 
     return 0;
 }
@@ -277,7 +281,7 @@ static int parse_config(const char *path)
 
 const config_t *config_get(void)
 {
-    return &g_config;
+    return g_ctx ? &g_ctx->cfg : NULL;
 }
 
 int config_set(const char *key, const char *value)
@@ -324,12 +328,12 @@ int config_set(const char *key, const char *value)
             buf[n] = '\0';
             parser_state_t st = { .section = "", .line_num = 0 };
             /* Parse into a temporary g_config, then restore */
-            config_t saved = g_config;
-            os_memset(&g_config, 0, sizeof(g_config));
-            g_config.log_level = FW_LOG_INFO;
+            config_t saved = g_ctx->cfg;
+            os_memset(&g_ctx->cfg, 0, sizeof(g_ctx->cfg));
+            g_ctx->cfg.log_level = FW_LOG_INFO;
             for_each_line(buf, parse_line, &st);
-            cfg = g_config;
-            g_config = saved;
+            cfg = g_ctx->cfg;
+            g_ctx->cfg = saved;
         }
     }
 
@@ -406,15 +410,15 @@ void config_show(void)
 {
     os_printf("=== Config ===\n");
     os_printf("  log.file   = %s\n",
-              g_config.log_file[0] ? g_config.log_file : "(stderr)");
-    os_printf("  log.level  = %d\n", g_config.log_level);
-    os_printf("  tp.workers = %d\n", g_config.threadpool_workers);
+              g_ctx->cfg.log_file[0] ? g_ctx->cfg.log_file : "(stderr)");
+    os_printf("  log.level  = %d\n", g_ctx->cfg.log_level);
+    os_printf("  tp.workers = %d\n", g_ctx->cfg.threadpool_workers);
     os_printf("  llm.endpoint = %s\n",
-              g_config.llm_endpoint[0] ? g_config.llm_endpoint : "(unset)");
+              g_ctx->cfg.llm_endpoint[0] ? g_ctx->cfg.llm_endpoint : "(unset)");
     os_printf("  llm.api_key  = %s\n",
-              g_config.llm_api_key[0] ? "***" : "(unset)");
+              g_ctx->cfg.llm_api_key[0] ? "***" : "(unset)");
     os_printf("  llm.model    = %s\n",
-              g_config.llm_model[0] ? g_config.llm_model : "(unset)");
+              g_ctx->cfg.llm_model[0] ? g_ctx->cfg.llm_model : "(unset)");
 }
 
 /* ── Module Registration ──────────────────────────────────────────── */
@@ -425,15 +429,17 @@ static void on_start_done(framework_event_type_t type,
 
 static int config_init(framework_module_t *mod)
 {
-    (void)mod;
+    g_ctx = (config_ctx_t *)os_calloc(1, sizeof(config_ctx_t));
+    if (!g_ctx) return -1;
+    mod->ctx = g_ctx;
 
     parse_config(CONFIG_PATH);
 
     /* Two-pass: shutdown stderr logger, re-init with configured file */
     fw_log_shutdown();
     fw_log_init(
-        g_config.log_file[0] ? g_config.log_file : NULL,
-        g_config.log_level
+        g_ctx->cfg.log_file[0] ? g_ctx->cfg.log_file : NULL,
+        g_ctx->cfg.log_level
     );
 
     /* Subscribe to framework lifecycle events */
@@ -457,7 +463,7 @@ static int config_start(framework_module_t *mod)
     (void)mod;
 
     /* Now all modules have inited — publish config for subscribers */
-    framework_event_publish(FW_EVENT_CONFIG_LOADED, &g_config, sizeof(g_config));
+    framework_event_publish(FW_EVENT_CONFIG_LOADED, &g_ctx->cfg, sizeof(g_ctx->cfg));
 
     LOG_INFO("Config: ready");
     return 0;
@@ -473,7 +479,7 @@ framework_module_t config_mod = {
     .loop     = NULL,
     .stop     = NULL,
     .deinit   = NULL,
-    .ctx      = &g_config,
+    
     .id       = 0,
     .next     = NULL,
 };

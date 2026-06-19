@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
 /* ── Framework Core (no changes below) ────────────────────────────── */
 
 int framework_init(void)
-{
+{ fw_log_bind_module("framework");
     fw_log_bind_module("framework");
     fw_log_init(NULL, FW_LOG_INFO);
 

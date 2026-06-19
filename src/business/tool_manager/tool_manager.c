@@ -17,9 +17,13 @@ typedef struct {
     int        active;
 } tool_entry_t;
 
-static tool_entry_t       g_tools[MAX_TOOLS];
-static int                g_tool_count;
-static os_mutex_handle_t  g_tool_mutex;
+typedef struct {
+    tool_entry_t       tools[MAX_TOOLS];
+    int                tool_count;
+    os_mutex_handle_t  tool_mutex;
+} tool_manager_ctx_t;
+
+static tool_manager_ctx_t *g_ctx = NULL;
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -50,30 +54,30 @@ int tool_register(const tool_def_t *tool)
 {
     if (!tool || !tool->name || !tool->execute) return -1;
 
-    os_mutex_lock(g_tool_mutex);
+    os_mutex_lock(g_ctx->tool_mutex);
 
     /* Check for duplicate */
-    for (int i = 0; i < g_tool_count; i++) {
-        if (g_tools[i].active &&
-            os_strcmp(g_tools[i].def.name, tool->name) == 0) {
-            os_mutex_unlock(g_tool_mutex);
+    for (int i = 0; i < g_ctx->tool_count; i++) {
+        if (g_ctx->tools[i].active &&
+            os_strcmp(g_ctx->tools[i].def.name, tool->name) == 0) {
+            os_mutex_unlock(g_ctx->tool_mutex);
             LOG_WARN("ToolManager: duplicate '%s'", tool->name);
             return -1;
         }
     }
 
-    if (g_tool_count >= MAX_TOOLS) {
-        os_mutex_unlock(g_tool_mutex);
+    if (g_ctx->tool_count >= MAX_TOOLS) {
+        os_mutex_unlock(g_ctx->tool_mutex);
         LOG_ERROR("ToolManager: registry full (%d)", MAX_TOOLS);
         return -1;
     }
 
-    g_tools[g_tool_count].def = *tool;
-    g_tools[g_tool_count].active = 1;
-    g_tool_count++;
+    g_ctx->tools[g_ctx->tool_count].def = *tool;
+    g_ctx->tools[g_ctx->tool_count].active = 1;
+    g_ctx->tool_count++;
 
     LOG_INFO("ToolManager: registered '%s'", tool->name);
-    os_mutex_unlock(g_tool_mutex);
+    os_mutex_unlock(g_ctx->tool_mutex);
     return 0;
 }
 
@@ -83,21 +87,21 @@ int tool_call(const char *name, const char *args_json,
     if (!name || !result || result_len == 0) return -1;
     if (!args_json) args_json = "{}";
 
-    os_mutex_lock(g_tool_mutex);
+    os_mutex_lock(g_ctx->tool_mutex);
 
-    for (int i = 0; i < g_tool_count; i++) {
-        if (g_tools[i].active &&
-            os_strcmp(g_tools[i].def.name, name) == 0) {
-            tool_def_t *t = &g_tools[i].def;
+    for (int i = 0; i < g_ctx->tool_count; i++) {
+        if (g_ctx->tools[i].active &&
+            os_strcmp(g_ctx->tools[i].def.name, name) == 0) {
+            tool_def_t *t = &g_ctx->tools[i].def;
             LOG_INFO("ToolManager: calling '%s'", name);
-            os_mutex_unlock(g_tool_mutex);
+            os_mutex_unlock(g_ctx->tool_mutex);
 
             int rc = t->execute(args_json, result, result_len, NULL);
             return rc;
         }
     }
 
-    os_mutex_unlock(g_tool_mutex);
+    os_mutex_unlock(g_ctx->tool_mutex);
     LOG_WARN("ToolManager: tool '%s' not found", name);
     return -1;
 }
@@ -109,16 +113,16 @@ int tool_list_json(char *buf, size_t buf_len)
     size_t pos = 0;
     buf[0] = '\0';
 
-    os_mutex_lock(g_tool_mutex);
+    os_mutex_lock(g_ctx->tool_mutex);
 
     if (json_append(buf, buf_len, &pos, "[") != 0) {
-        os_mutex_unlock(g_tool_mutex);
+        os_mutex_unlock(g_ctx->tool_mutex);
         return -1;
     }
 
     int count = 0;
-    for (int i = 0; i < g_tool_count; i++) {
-        if (!g_tools[i].active) continue;
+    for (int i = 0; i < g_ctx->tool_count; i++) {
+        if (!g_ctx->tools[i].active) continue;
 
         if (count > 0 && json_append(buf, buf_len, &pos, ",") != 0)
             break;
@@ -126,14 +130,14 @@ int tool_list_json(char *buf, size_t buf_len)
         if (json_append(buf, buf_len, &pos,
                         "{\"name\":\"") != 0) break;
         if (json_append_escaped(buf, buf_len, &pos,
-                                g_tools[i].def.name) != 0) break;
+                                g_ctx->tools[i].def.name) != 0) break;
         if (json_append(buf, buf_len, &pos,
                         "\",\"description\":\"") != 0) break;
         if (json_append_escaped(buf, buf_len, &pos,
-                                g_tools[i].def.description) != 0) break;
+                                g_ctx->tools[i].def.description) != 0) break;
         if (json_append(buf, buf_len, &pos, "\",\"parameters\":") != 0) break;
         if (json_append(buf, buf_len, &pos,
-                        g_tools[i].def.params_json) != 0) break;
+                        g_ctx->tools[i].def.params_json) != 0) break;
         if (json_append(buf, buf_len, &pos, "}") != 0) break;
 
         count++;
@@ -141,15 +145,15 @@ int tool_list_json(char *buf, size_t buf_len)
 
     json_append(buf, buf_len, &pos, "]");
 
-    os_mutex_unlock(g_tool_mutex);
+    os_mutex_unlock(g_ctx->tool_mutex);
     return count;
 }
 
 int tool_count(void)
 {
-    os_mutex_lock(g_tool_mutex);
-    int n = g_tool_count;
-    os_mutex_unlock(g_tool_mutex);
+    os_mutex_lock(g_ctx->tool_mutex);
+    int n = g_ctx->tool_count;
+    os_mutex_unlock(g_ctx->tool_mutex);
     return n;
 }
 
@@ -165,17 +169,19 @@ static int echo_execute(const char *args_json, char *result,
 
 static int tool_manager_init(framework_module_t *mod)
 {
-    (void)mod;
+    g_ctx = (tool_manager_ctx_t *)os_calloc(1, sizeof(tool_manager_ctx_t));
+    if (!g_ctx) return -1;
+    mod->ctx = g_ctx;
 
-    g_tool_mutex = os_mutex_create();
-    if (!g_tool_mutex) {
+    g_ctx->tool_mutex = os_mutex_create();
+    if (!g_ctx->tool_mutex) {
         LOG_ERROR("ToolManager: mutex create failed");
         return -1;
     }
 
-    g_tool_count = 0;
+    g_ctx->tool_count = 0;
     for (int i = 0; i < MAX_TOOLS; i++) {
-        g_tools[i].active = 0;
+        g_ctx->tools[i].active = 0;
     }
 
     LOG_INFO("ToolManager: init (%d slots)", MAX_TOOLS);
@@ -196,7 +202,7 @@ static int tool_manager_start(framework_module_t *mod)
     tool_register(&echo);
 
     LOG_INFO("ToolManager: ready (%d tool%s)",
-             g_tool_count, g_tool_count == 1 ? "" : "s");
+             g_ctx->tool_count, g_ctx->tool_count == 1 ? "" : "s");
     return 0;
 }
 
@@ -210,9 +216,9 @@ static int tool_manager_stop(framework_module_t *mod)
 static int tool_manager_deinit(framework_module_t *mod)
 {
     (void)mod;
-    if (g_tool_mutex) {
-        os_mutex_destroy(g_tool_mutex);
-        g_tool_mutex = NULL;
+    if (g_ctx->tool_mutex) {
+        os_mutex_destroy(g_ctx->tool_mutex);
+        g_ctx->tool_mutex = NULL;
     }
     LOG_INFO("ToolManager: deinit");
     return 0;

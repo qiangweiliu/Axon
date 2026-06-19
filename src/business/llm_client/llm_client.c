@@ -27,7 +27,11 @@
 extern const llm_model_t *__start___llm_models[];
 extern const llm_model_t *__stop___llm_models[];
 
-static const llm_model_t *g_default_model = NULL;
+typedef struct {
+    const llm_model_t *default_model;
+} llm_client_ctx_t;
+
+static llm_client_ctx_t *g_ctx = NULL;
 
 void llm_model_discover(void)
 {
@@ -35,16 +39,16 @@ void llm_model_discover(void)
     for (size_t i = 0; i < count; i++) {
         const llm_model_t *m = __start___llm_models[i];
         if (!m) continue;
-        if (!g_default_model) g_default_model = m;
+        if (!g_ctx->default_model) g_ctx->default_model = m;
         LOG_INFO("LLM: model '%s' registered (%s)", m->name, m->build_body ? "ready" : "broken");
     }
-    if (!g_default_model)
+    if (!g_ctx->default_model)
         LOG_WARN("LLM: no model adapters registered");
 }
 
 const llm_model_t* llm_model_select(const char *model_name)
 {
-    if (!model_name || !g_default_model) return g_default_model;
+    if (!model_name || !g_ctx->default_model) return g_ctx->default_model;
     size_t count = (size_t)(__stop___llm_models - __start___llm_models);
     for (size_t i = 0; i < count; i++) {
         const llm_model_t *m = __start___llm_models[i];
@@ -53,7 +57,7 @@ const llm_model_t* llm_model_select(const char *model_name)
                        os_strlen(m->name)) == 0)
             return m;
     }
-    return g_default_model;
+    return g_ctx->default_model;
 }
 
 /* ── URL parsing ────────────────────────────────────────────────── */
@@ -367,7 +371,9 @@ llm_response_t *llm_chat_stream(const char *endpoint,
 
 static int llm_client_init(framework_module_t *mod)
 {
-    (void)mod;
+    g_ctx = (llm_client_ctx_t *)os_calloc(1, sizeof(llm_client_ctx_t));
+    if (!g_ctx) return -1;
+    mod->ctx = g_ctx;
     llm_model_discover();
     LOG_INFO("LLM: init"); return 0;
 }

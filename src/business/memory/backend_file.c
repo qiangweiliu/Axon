@@ -17,7 +17,11 @@
 #define DB_PATH_TMP     "data/memory.db.tmp"
 #define LINE_MAX        12288   /* MEMORY_CONTENT_MAX + overhead */
 
-static os_mutex_handle_t g_db_mutex;
+typedef struct {
+    os_mutex_handle_t db_mutex;
+} backend_file_ctx_t;
+
+static backend_file_ctx_t *g_ctx = NULL;
 
 /* ── Escape / Unescape ────────────────────────────────────────────── */
 
@@ -137,13 +141,17 @@ static int file_init(void)
 
     os_file_handle_t fh = os_file_open(DB_PATH, "a");
     if (fh) { os_file_close(fh); }
-    g_db_mutex = os_mutex_create();
-    return g_db_mutex ? 0 : -1;
+    if (!g_ctx) {
+        g_ctx = (backend_file_ctx_t *)os_calloc(1, sizeof(backend_file_ctx_t));
+        if (!g_ctx) return -1;
+    }
+    g_ctx->db_mutex = os_mutex_create();
+    return g_ctx->db_mutex ? 0 : -1;
 }
 
 static int file_shutdown(void)
 {
-    if (g_db_mutex) { os_mutex_destroy(g_db_mutex); g_db_mutex = NULL; }
+    if (g_ctx->db_mutex) { os_mutex_destroy(g_ctx->db_mutex); g_ctx->db_mutex = NULL; }
     return 0;
 }
 
@@ -159,12 +167,12 @@ static int file_store(const memory_entry_t *entry, char *id_out, size_t id_len)
     int n = entry_to_line(&e, line, sizeof(line));
     if (n <= 0) return -1;
 
-    os_mutex_lock(g_db_mutex);
+    os_mutex_lock(g_ctx->db_mutex);
     os_file_handle_t fh = os_file_open(DB_PATH, "a");
-    if (!fh) { os_mutex_unlock(g_db_mutex); return -1; }
+    if (!fh) { os_mutex_unlock(g_ctx->db_mutex); return -1; }
     os_file_write(fh, line, (size_t)n);
     os_file_close(fh);
-    os_mutex_unlock(g_db_mutex);
+    os_mutex_unlock(g_ctx->db_mutex);
 
     if (id_out && id_len > 0) {
         size_t elen = os_strlen(e.id);
@@ -180,9 +188,9 @@ static int file_retrieve(const char *id, memory_entry_t *entry_out)
 {
     if (!id || !entry_out) return -1;
 
-    os_mutex_lock(g_db_mutex);
+    os_mutex_lock(g_ctx->db_mutex);
     os_file_handle_t fh = os_file_open(DB_PATH, "r");
-    if (!fh) { os_mutex_unlock(g_db_mutex); return -1; }
+    if (!fh) { os_mutex_unlock(g_ctx->db_mutex); return -1; }
 
     char line[LINE_MAX];
     size_t pos = 0;
@@ -208,7 +216,7 @@ static int file_retrieve(const char *id, memory_entry_t *entry_out)
     }
 
     os_file_close(fh);
-    os_mutex_unlock(g_db_mutex);
+    os_mutex_unlock(g_ctx->db_mutex);
     return found ? 0 : -1;
 }
 
@@ -217,19 +225,19 @@ static int file_update(const char *id, const memory_entry_t *entry)
     /* Read all, rewrite file replacing matching entry */
     if (!id || !entry) return -1;
 
-    os_mutex_lock(g_db_mutex);
+    os_mutex_lock(g_ctx->db_mutex);
     os_file_handle_t fh = os_file_open(DB_PATH, "r");
-    if (!fh) { os_mutex_unlock(g_db_mutex); return -1; }
+    if (!fh) { os_mutex_unlock(g_ctx->db_mutex); return -1; }
 
     char *buf = (char *)os_alloc(65536);
-    if (!buf) { os_file_close(fh); os_mutex_unlock(g_db_mutex); return -1; }
+    if (!buf) { os_file_close(fh); os_mutex_unlock(g_ctx->db_mutex); return -1; }
     size_t total = os_file_read(fh, buf, 65535);
     os_file_close(fh);
     buf[total] = '\0';
 
     /* Rewrite to temp file */
     os_file_handle_t fout = os_file_open(DB_PATH_TMP, "w");
-    if (!fout) { os_free(buf); os_mutex_unlock(g_db_mutex); return -1; }
+    if (!fout) { os_free(buf); os_mutex_unlock(g_ctx->db_mutex); return -1; }
 
     char new_line[LINE_MAX];
     memory_entry_t e = *entry;
@@ -283,7 +291,7 @@ static int file_update(const char *id, const memory_entry_t *entry)
     if (tmp_fh) os_file_close(tmp_fh);
     if (dst_fh) os_file_close(dst_fh);
 
-    os_mutex_unlock(g_db_mutex);
+    os_mutex_unlock(g_ctx->db_mutex);
     return 0;
 }
 
@@ -291,18 +299,18 @@ static int file_remove(const char *id)
 {
     if (!id) return -1;
 
-    os_mutex_lock(g_db_mutex);
+    os_mutex_lock(g_ctx->db_mutex);
     os_file_handle_t fh = os_file_open(DB_PATH, "r");
-    if (!fh) { os_mutex_unlock(g_db_mutex); return -1; }
+    if (!fh) { os_mutex_unlock(g_ctx->db_mutex); return -1; }
 
     char *buf = (char *)os_alloc(65536);
-    if (!buf) { os_file_close(fh); os_mutex_unlock(g_db_mutex); return -1; }
+    if (!buf) { os_file_close(fh); os_mutex_unlock(g_ctx->db_mutex); return -1; }
     size_t total = os_file_read(fh, buf, 65535);
     os_file_close(fh);
     buf[total] = '\0';
 
     os_file_handle_t fout = os_file_open(DB_PATH_TMP, "w");
-    if (!fout) { os_free(buf); os_mutex_unlock(g_db_mutex); return -1; }
+    if (!fout) { os_free(buf); os_mutex_unlock(g_ctx->db_mutex); return -1; }
 
     const char *p = buf;
     while (*p) {
@@ -341,7 +349,7 @@ static int file_remove(const char *id)
     if (tmp_fh) os_file_close(tmp_fh);
     if (dst_fh) os_file_close(dst_fh);
 
-    os_mutex_unlock(g_db_mutex);
+    os_mutex_unlock(g_ctx->db_mutex);
     return 0;
 }
 
@@ -351,9 +359,9 @@ static int file_search(const char *query, memory_entry_t *results,
     if (!query || !results || max_results < 1 || !out_count) return -1;
     *out_count = 0;
 
-    os_mutex_lock(g_db_mutex);
+    os_mutex_lock(g_ctx->db_mutex);
     os_file_handle_t fh = os_file_open(DB_PATH, "r");
-    if (!fh) { os_mutex_unlock(g_db_mutex); *out_count = 0; return 0; }
+    if (!fh) { os_mutex_unlock(g_ctx->db_mutex); *out_count = 0; return 0; }
 
     char line[LINE_MAX];
     size_t pos = 0;
@@ -390,14 +398,14 @@ static int file_search(const char *query, memory_entry_t *results,
     }
 
     os_file_close(fh);
-    os_mutex_unlock(g_db_mutex);
+    os_mutex_unlock(g_ctx->db_mutex);
     return 0;
 }
 
 static int file_count(void)
 {
     int n = 0;
-    os_mutex_lock(g_db_mutex);
+    os_mutex_lock(g_ctx->db_mutex);
     os_file_handle_t fh = os_file_open(DB_PATH, "r");
     if (fh) {
         char c;
@@ -405,16 +413,16 @@ static int file_count(void)
             if (c == '\n') n++;
         os_file_close(fh);
     }
-    os_mutex_unlock(g_db_mutex);
+    os_mutex_unlock(g_ctx->db_mutex);
     return n;
 }
 
 static int file_clear(void)
 {
-    os_mutex_lock(g_db_mutex);
+    os_mutex_lock(g_ctx->db_mutex);
     os_file_handle_t fh = os_file_open(DB_PATH, "w");
     if (fh) os_file_close(fh);
-    os_mutex_unlock(g_db_mutex);
+    os_mutex_unlock(g_ctx->db_mutex);
     return 0;
 }
 

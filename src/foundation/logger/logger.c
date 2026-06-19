@@ -19,23 +19,28 @@
 #include <stdatomic.h>
 
 #define MAX_MOD 64
-static struct { char name[64]; fw_log_level_t lvl; } g_mods[MAX_MOD];
-static _Atomic int g_mod_n;
-static fw_log_level_t g_global_lvl = FW_LOG_INFO;
-
 #define RING_N   1024
 #define ENTRY_N  4096
 
-static char g_ring[RING_N][ENTRY_N];
-static _Atomic unsigned g_rb_h;
-static _Atomic unsigned g_rb_t;
-static _Atomic unsigned g_rb_c;
+typedef struct {
+    struct { char name[64]; fw_log_level_t lvl; } mods[MAX_MOD];
+    _Atomic int mod_n;
+    fw_log_level_t global_lvl;
+    char ring[RING_N][ENTRY_N];
+    _Atomic unsigned rb_h;
+    _Atomic unsigned rb_t;
+    _Atomic unsigned rb_c;
+    fw_log_backend_t be;
+    os_file_handle_t flog;
+    _Atomic int active;
+    os_thread_handle_t tid;
+    const char *cur_mod;
+} logger_ctx_t;
 
-static fw_log_backend_t g_be = FW_LOG_BACKEND_NONE;
-static os_file_handle_t g_flog = NULL;
-static _Atomic int g_active;
-static os_thread_handle_t g_tid;
-static const char *g_cur_mod;
+/* Static allocation: always available before init, no heap dependency.
+   logger_init can re-init fields, but the pointer itself is never NULL. */
+static logger_ctx_t g_ctx_storage;
+static logger_ctx_t *g_ctx = &g_ctx_storage;
 
 static const char *lvl_str(fw_log_level_t l)
 {
@@ -53,18 +58,18 @@ static void rb_push(const char *s, size_t n)
 {
     unsigned slot;
     for (;;) {
-        unsigned h = atomic_load_explicit(&g_rb_h, memory_order_relaxed);
-        unsigned c = atomic_load_explicit(&g_rb_c, memory_order_relaxed);
+        unsigned h = atomic_load_explicit(&g_ctx->rb_h, memory_order_relaxed);
+        unsigned c = atomic_load_explicit(&g_ctx->rb_c, memory_order_relaxed);
         if (c >= RING_N) {
-            unsigned t = atomic_load_explicit(&g_rb_t, memory_order_relaxed);
-            if (atomic_compare_exchange_weak_explicit(&g_rb_t, &t, (t+1) % RING_N,
+            unsigned t = atomic_load_explicit(&g_ctx->rb_t, memory_order_relaxed);
+            if (atomic_compare_exchange_weak_explicit(&g_ctx->rb_t, &t, (t+1) % RING_N,
                                                       memory_order_relaxed, memory_order_relaxed)) {
-                atomic_fetch_sub_explicit(&g_rb_c, 1, memory_order_relaxed);
+                atomic_fetch_sub_explicit(&g_ctx->rb_c, 1, memory_order_relaxed);
                 continue;
             }
             continue;
         }
-        if (atomic_compare_exchange_weak_explicit(&g_rb_h, &h, (h+1) % RING_N,
+        if (atomic_compare_exchange_weak_explicit(&g_ctx->rb_h, &h, (h+1) % RING_N,
                                                    memory_order_release, memory_order_relaxed)) {
             slot = h;
             break;
@@ -72,9 +77,9 @@ static void rb_push(const char *s, size_t n)
     }
 
     if (n >= ENTRY_N) n = ENTRY_N - 1;
-    os_memcpy(g_ring[slot], s, n);
-    g_ring[slot][n] = '\0';
-    atomic_fetch_add_explicit(&g_rb_c, 1, memory_order_release);
+    os_memcpy(g_ctx->ring[slot], s, n);
+    g_ctx->ring[slot][n] = '\0';
+    atomic_fetch_add_explicit(&g_ctx->rb_c, 1, memory_order_release);
 }
 
 static void do_printf(fw_log_level_t l, const char *mod, const char *fmt, va_list ap)
@@ -92,22 +97,22 @@ static void do_printf(fw_log_level_t l, const char *mod, const char *fmt, va_lis
 static void *log_thread(void *arg)
 {
     (void)arg;
-    while (atomic_load_explicit(&g_active, memory_order_acquire)) {
+    while (atomic_load_explicit(&g_ctx->active, memory_order_acquire)) {
         os_sleep_ms(2);
         for (;;) {
-            unsigned c = atomic_load_explicit(&g_rb_c, memory_order_acquire);
+            unsigned c = atomic_load_explicit(&g_ctx->rb_c, memory_order_acquire);
             if (c == 0) break;
-            unsigned t = atomic_load_explicit(&g_rb_t, memory_order_relaxed);
-            const char *entry = g_ring[t];
+            unsigned t = atomic_load_explicit(&g_ctx->rb_t, memory_order_relaxed);
+            const char *entry = g_ctx->ring[t];
             size_t n = os_strlen(entry);
             if (n == 0) break;
-            if (!atomic_compare_exchange_weak_explicit(&g_rb_t, &t, (t+1) % RING_N,
+            if (!atomic_compare_exchange_weak_explicit(&g_ctx->rb_t, &t, (t+1) % RING_N,
                                                         memory_order_relaxed, memory_order_relaxed))
                 continue;
-            atomic_fetch_sub_explicit(&g_rb_c, 1, memory_order_release);
-            if (g_flog) {
-                os_file_write(g_flog, entry, n);
-                os_file_write(g_flog, "\n", 1);
+            atomic_fetch_sub_explicit(&g_ctx->rb_c, 1, memory_order_release);
+            if (g_ctx->flog) {
+                os_file_write(g_ctx->flog, entry, n);
+                os_file_write(g_ctx->flog, "\n", 1);
             } else {
                 os_fprintf_stderr("%s\n", entry);
             }
@@ -116,16 +121,16 @@ static void *log_thread(void *arg)
 
     /* Final drain */
     while (1) {
-        unsigned c = atomic_load_explicit(&g_rb_c, memory_order_acquire);
+        unsigned c = atomic_load_explicit(&g_ctx->rb_c, memory_order_acquire);
         if (c == 0) break;
-        unsigned t = atomic_load_explicit(&g_rb_t, memory_order_relaxed);
-        const char *entry = g_ring[t];
+        unsigned t = atomic_load_explicit(&g_ctx->rb_t, memory_order_relaxed);
+        const char *entry = g_ctx->ring[t];
         size_t n = os_strlen(entry);
         if (n == 0) break;
-        if (!atomic_compare_exchange_weak_explicit(&g_rb_t, &t, (t+1) % RING_N,
+        if (!atomic_compare_exchange_weak_explicit(&g_ctx->rb_t, &t, (t+1) % RING_N,
                                                     memory_order_relaxed, memory_order_relaxed))
             continue;
-        atomic_fetch_sub_explicit(&g_rb_c, 1, memory_order_release);
+        atomic_fetch_sub_explicit(&g_ctx->rb_c, 1, memory_order_release);
         os_fprintf_stderr("%s\n", entry);
     }
     return NULL;
@@ -133,48 +138,48 @@ static void *log_thread(void *arg)
 
 void fw_log_switch(fw_log_backend_t backend)
 {
-    if (backend == g_be) return;
+    if (backend == g_ctx->be) return;
 
     if (backend == FW_LOG_BACKEND_BUFFERED) {
-        if (!atomic_load_explicit(&g_active, memory_order_acquire)) {
-            atomic_store_explicit(&g_active, 1, memory_order_release);
-            os_thread_create(&g_tid, log_thread, NULL);
-            os_thread_detach(g_tid);
+        if (!atomic_load_explicit(&g_ctx->active, memory_order_acquire)) {
+            atomic_store_explicit(&g_ctx->active, 1, memory_order_release);
+            os_thread_create(&g_ctx->tid, log_thread, NULL);
+            os_thread_detach(g_ctx->tid);
         }
     } else {
         while (1) {
-            unsigned c = atomic_load_explicit(&g_rb_c, memory_order_acquire);
+            unsigned c = atomic_load_explicit(&g_ctx->rb_c, memory_order_acquire);
             if (c == 0) break;
-            unsigned t = atomic_load_explicit(&g_rb_t, memory_order_relaxed);
-            const char *entry = g_ring[t];
+            unsigned t = atomic_load_explicit(&g_ctx->rb_t, memory_order_relaxed);
+            const char *entry = g_ctx->ring[t];
             size_t n = os_strlen(entry);
             if (n == 0) break;
-            if (!atomic_compare_exchange_weak_explicit(&g_rb_t, &t, (t+1) % RING_N,
+            if (!atomic_compare_exchange_weak_explicit(&g_ctx->rb_t, &t, (t+1) % RING_N,
                                                         memory_order_relaxed, memory_order_relaxed))
                 continue;
-            atomic_fetch_sub_explicit(&g_rb_c, 1, memory_order_release);
+            atomic_fetch_sub_explicit(&g_ctx->rb_c, 1, memory_order_release);
             os_fprintf_stderr("%s\n", entry);
         }
-        if (atomic_load_explicit(&g_active, memory_order_acquire)) {
-            atomic_store_explicit(&g_active, 0, memory_order_release);
-            os_thread_join(g_tid);
+        if (atomic_load_explicit(&g_ctx->active, memory_order_acquire)) {
+            atomic_store_explicit(&g_ctx->active, 0, memory_order_release);
+            os_thread_join(g_ctx->tid);
         }
     }
 
-    g_be = backend;
+    g_ctx->be = backend;
 }
 
 fw_log_backend_t fw_log_get_backend(void)
 {
-    return g_be;
+    return g_ctx->be;
 }
 
 int fw_log_init(const char *log_file, fw_log_level_t lvl)
 {
-    g_global_lvl = lvl;
+    g_ctx->global_lvl = lvl;
     if (log_file) {
-        g_flog = os_file_open(log_file, "a");
-        if (!g_flog) {
+        g_ctx->flog = os_file_open(log_file, "a");
+        if (!g_ctx->flog) {
             char msg[256];
             os_snprintf(msg, sizeof(msg), "Logger: can't open '%s'\n", log_file);
             os_fprintf_stderr("%s", msg);
@@ -186,14 +191,14 @@ int fw_log_init(const char *log_file, fw_log_level_t lvl)
 
 int fw_log_set_level(const char *name, fw_log_level_t lvl)
 {
-    int n = atomic_load_explicit(&g_mod_n, memory_order_acquire);
+    int n = atomic_load_explicit(&g_ctx->mod_n, memory_order_acquire);
     for (int i = 0; i < n; i++)
-        if (os_strcmp(g_mods[i].name, name) == 0) { g_mods[i].lvl = lvl; return 0; }
+        if (os_strcmp(g_ctx->mods[i].name, name) == 0) { g_ctx->mods[i].lvl = lvl; return 0; }
     if (n < MAX_MOD) {
-        os_strncpy(g_mods[n].name, name, 63);
-        g_mods[n].name[63] = '\0';
-        g_mods[n].lvl = lvl;
-        atomic_store_explicit(&g_mod_n, n + 1, memory_order_release);
+        os_strncpy(g_ctx->mods[n].name, name, 63);
+        g_ctx->mods[n].name[63] = '\0';
+        g_ctx->mods[n].lvl = lvl;
+        atomic_store_explicit(&g_ctx->mod_n, n + 1, memory_order_release);
     }
     return 0;
 }
@@ -201,22 +206,23 @@ int fw_log_set_level(const char *name, fw_log_level_t lvl)
 void fw_log_shutdown(void)
 {
     fw_log_switch(FW_LOG_BACKEND_NONE);
-    if (g_flog) { os_file_close(g_flog); g_flog = NULL; }
+    if (g_ctx->flog) { os_file_close(g_ctx->flog); g_ctx->flog = NULL; }
 }
 
 void _fw_log(fw_log_level_t lvl, const char *mod, const char *fmt, ...)
 {
-    if (lvl < g_global_lvl) return;
+    if (!g_ctx) return;
+    if (lvl < g_ctx->global_lvl) return;
 
-    fw_log_level_t eff = g_global_lvl;
+    fw_log_level_t eff = g_ctx->global_lvl;
     if (mod && os_strcmp(mod, "(none)") != 0 && os_strcmp(mod, "(unknown)") != 0) {
-        int n = atomic_load_explicit(&g_mod_n, memory_order_acquire);
+        int n = atomic_load_explicit(&g_ctx->mod_n, memory_order_acquire);
         for (int i = 0; i < n; i++)
-            if (os_strcmp(g_mods[i].name, mod) == 0) { eff = g_mods[i].lvl; break; }
+            if (os_strcmp(g_ctx->mods[i].name, mod) == 0) { eff = g_ctx->mods[i].lvl; break; }
     }
     if (lvl < eff) return;
 
-    if (g_be == FW_LOG_BACKEND_NONE) {
+    if (g_ctx->be == FW_LOG_BACKEND_NONE) {
         va_list ap; os_va_start(ap, fmt); do_printf(lvl, mod, fmt, ap); os_va_end(ap);
         return;
     }
@@ -239,17 +245,22 @@ void _fw_log(fw_log_level_t lvl, const char *mod, const char *fmt, ...)
 
 void fw_log_bind_module(const char *name)
 {
-    g_cur_mod = name ? name : "(none)";
+    g_ctx->cur_mod = name ? name : "(none)";
 }
 
 const char *fw_log_get_module(void)
 {
-    return g_cur_mod ? g_cur_mod : "(none)";
+    return g_ctx->cur_mod ? g_ctx->cur_mod : "(none)";
 }
 
 /* ── Module registration ─────────────────────────────────────────── */
 
-static int logger_init(struct framework_module *m) { (void)m; LOG_INFO("Logger: init"); return 0; }
+static int logger_init(struct framework_module *m) {
+    m->ctx = g_ctx;
+    g_ctx->active = 1;
+    g_ctx->be = FW_LOG_BACKEND_NONE;
+    LOG_INFO("Logger: init"); return 0;
+}
 static int logger_start(struct framework_module *m) { (void)m; LOG_INFO("Logger: ready"); return 0; }
 
 struct framework_module logger_mod = {
