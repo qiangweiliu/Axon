@@ -6,7 +6,7 @@
 
 ## 一、概述
 
-无锁异步日志模块（Foundation 层，priority=10）。提供模块级日志级别控制，双后端（直接输出 / 环形缓冲+独立线程）。
+无锁异步日志模块（Foundation 层，LAYER_CORE）。提供模块级日志级别控制，双后端（直接输出 / 环形缓冲+独立线程）。
 
 ## 二、文件清单
 
@@ -57,5 +57,6 @@ LOG_DEBUG(fmt, ...) / LOG_INFO / LOG_WARN / LOG_ERROR / LOG_FATAL
 ## 六、模块注册
 
 - name: "logger"
-- priority: 10（Foundation 层，最低优先级编号，最早初始化）
-- init/start: 无操作（fw_log_init 在 framework_main.c 中提前调用）
+- layer: CORE（链接顺序第一）
+- init: 初始化环形缓冲、设置后端为 NONE
+- start: 空操作（fw_log_init 在 framework_main.c 中提前调用）

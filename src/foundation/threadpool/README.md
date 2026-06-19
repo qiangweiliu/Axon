@@ -6,8 +6,7 @@
 
 ## 一、概述
 
-线程池模块（Foundation 层，priority=20），在日志模块（priority=10）之前初始化。
-自动检测 CPU 核心数（8核），创建 8 个常驻工作线程。
+线程池模块（Foundation 层，LAYER_INFRA）。自动检测 CPU 核心数，创建常驻工作线程。
 框架 lifecycle.c 在 init/start 阶段检测 g_threadpool，自动切换并行执行剩余模块。
 
 ## 二、文件清单
@@ -16,7 +15,6 @@
 |------|------|------|
 | threadpool.h | src/foundation/threadpool/ | 公共 API 声明 |
 | threadpool.c | src/foundation/threadpool/ | 实现 + MODULE_REGISTER |
-| README.md | src/foundation/threadpool/ | 本设计文档 |
 
 ## 三、数据结构
 
@@ -49,7 +47,7 @@ threadpool_t *threadpool_create(int num_workers);
 /* 销毁线程池，等待所有 worker 退出 */
 void threadpool_destroy(threadpool_t *pool);
 
-/* 提交任务：fn 返回 0 表示成功，结果写入 *result_out */
+/* 提交任务 */
 int threadpool_submit(threadpool_t *pool,
                       int (*fn)(void *arg),
                       void *arg,
@@ -65,7 +63,7 @@ int threadpool_pending(threadpool_t *pool);
 ## 五、模块注册
 
 - name: "threadpool"
-- priority: 20（Foundation 层，紧跟 logger=10）
+- layer: INFRA
 - init: 调用 threadpool_create(CPU_COUNT)，设置 g_threadpool
 - start: 确认池已就绪
 - stop/deinit: threadpool_destroy
@@ -88,13 +86,3 @@ int threadpool_pending(threadpool_t *pool);
 ## 八、配置
 
 无外部配置。线程数 = sysconf(_SC_NPROCESSORS_ONLN)，通过 os_sysconf() 封装。
-
-## 九、功能清单
-
-- [x] os_sysconf() 封装
-- [x] threadpool_create / destroy
-- [x] threadpool_submit / wait / pending
-- [x] MODULE_REGISTER 注册 (priority=20)
-- [x] lifecycle.c 并行 init/start 集成
-- [x] Makefile 自动发现 src/modules/
-- [x] 构建零警告，0 内存泄漏
