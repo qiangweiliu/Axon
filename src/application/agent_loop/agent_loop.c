@@ -402,9 +402,17 @@ static int handle_ask(const char *question, char *out, size_t out_len)
         return -1;
     }
 
-    /* Print non-streaming response */
+    /* Print non-streaming response with \n escaping */
     if (resp->content) {
-        os_printf("%s\n", resp->content);
+        for (const char *p = resp->content; *p; p++) {
+            if (*p == '\\' && (*(p+1) == 'n' || *(p+1) == 'N')) {
+                os_printf("\n");
+                p++;
+            } else {
+                os_printf("%c", *p);
+            }
+        }
+        os_printf("\n");
         fflush(stdout);
     }
 
