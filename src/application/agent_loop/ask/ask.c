@@ -27,34 +27,43 @@ static void *spinner_thread(void *arg)
 }
 
 
-/* First token callback — stops spinner, shows response */
+/* Box-drawing helpers */
+#define BOX_FILL(c, start, end) do { \
+    for (int _i = 0; _i < LINE_WIDTH - (start) - (end); _i++) os_printf("%s", c); \
+} while(0)
 
-
-static void on_llm_token(const char *token, size_t len,
-                         int tokens_so_far, uint64_t elapsed_ms,
-                         int is_reasoning,
-                         void *user)
+static void print_reasoning_top(void)
 {
-    (void)len; (void)tokens_so_far; (void)elapsed_ms; (void)user;
-    if (!g_ctx->first_token) {
-        g_ctx->first_token = 1;
-        g_ctx->saw_reasoning = 0;
-        g_spinner_on = 0;
-        os_sleep_ms(300);
-        os_printf("\033[K");  /* clear the spinner line */
-    }
+    os_printf("┌─ " DIM "Reasoning" RST " ");
+    BOX_FILL("─", 13, 1);
+    os_printf("┐\n");
+}
 
-    /* Transition from reasoning to content: 1 blank line gap */
-    if (g_ctx->saw_reasoning == 1 && !is_reasoning) {
-        os_printf("\n");
-        g_ctx->saw_reasoning = 0;  /* reset, gap done */
-    }
-    if (is_reasoning) g_ctx->saw_reasoning = 1;
+static void print_reasoning_bottom(void)
+{
+    os_printf("└");
+    BOX_FILL("─", 0, 0);
+    os_printf("┘\n");
+}
 
-    /* Convert literal \n to actual newlines, apply color */
-    const char *prefix = is_reasoning ? DIM : "";
-    const char *suffix = is_reasoning ? RST : "";
-    os_printf("%s", prefix);
+static void print_answer_top(void)
+{
+    os_printf("╭─ " CYN "⚕ Axon" RST " ");
+    BOX_FILL("─", 12, 1);
+    os_printf("╮\n");
+}
+
+static void print_answer_bottom(void)
+{
+    os_printf("╰");
+    BOX_FILL("─", 0, 0);
+    os_printf("╯\n");
+}
+
+/* Print token with \\n escaping */
+static void print_token(const char *token, const char *color_prefix)
+{
+    if (color_prefix && color_prefix[0]) os_printf("%s", color_prefix);
     for (const char *p = token; *p; p++) {
         if (*p == '\\' && (*(p+1) == 'n' || *(p+1) == 'N')) {
             os_printf("\n");
@@ -63,7 +72,47 @@ static void on_llm_token(const char *token, size_t len,
             os_printf("%c", *p);
         }
     }
-    os_printf("%s", suffix);
+    if (color_prefix && color_prefix[0]) os_printf("%s", RST);
+}
+
+
+/* First token callback — stops spinner, shows response */
+/* States: first_token=0 initial, 1=box open, 2=box closed */
+static void on_llm_token(const char *token, size_t len,
+                         int tokens_so_far, uint64_t elapsed_ms,
+                         int is_reasoning,
+                         void *user)
+{
+    (void)len; (void)tokens_so_far; (void)elapsed_ms; (void)user;
+
+    /* First token ever: clear spinner, open reasoning box */
+    if (!g_ctx->first_token) {
+        g_ctx->first_token = 1;
+        g_spinner_on = 0;
+        os_sleep_ms(300);
+        os_printf("\033[K");  /* clear the spinner line */
+        g_ctx->saw_reasoning = 0;
+
+        if (is_reasoning) {
+            print_reasoning_top();
+            g_ctx->saw_reasoning = 1;  /* reasoning box open */
+        } else {
+            print_answer_top();
+            g_ctx->saw_reasoning = 2;  /* answer box open, no reasoning */
+        }
+        fflush(stdout);
+    }
+
+    /* Transition from reasoning to content */
+    if (g_ctx->saw_reasoning == 1 && !is_reasoning) {
+        print_reasoning_bottom();
+        os_printf("\n");
+        print_answer_top();
+        g_ctx->saw_reasoning = 2;  /* answer box open */
+    }
+
+    /* Print token with color */
+    print_token(token, is_reasoning ? DIM : "");
     fflush(stdout);
 }
 
@@ -151,10 +200,20 @@ int handle_ask(const char *question, char *out, size_t out_len)
 
     if (!resp) {
         if (out) os_snprintf(out, out_len, RED "%% LLM unavailable" RST);
+        /* Close the answer box if it was opened */
+        if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
         return -1;
     }
 
     resp->latency_ms = elapsed;
+
+    /* Close answer box */
+    if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
+    /* If only reasoning box was opened (no content), close it too */
+    if (g_ctx->saw_reasoning == 1) {
+        print_reasoning_bottom();
+        os_printf("\n");
+    }
 
     /* Stats bar */
     if (out) {
