@@ -45,8 +45,8 @@
 
 /* ── Persistent memory files (Hermes-style) ───────────────────────── */
 
-#define MEMFILE_MEMORY_LIMIT  2200
-#define MEMFILE_USER_LIMIT    1375
+#define MEMFILE_MEMORY_LIMIT  8000
+#define MEMFILE_USER_LIMIT    4000
 
 typedef struct {
     memfile_t mem;
@@ -446,18 +446,19 @@ static int handle_ask(const char *question, char *out, size_t out_len)
         }
         /* Show memory usage if entries exist */
         if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
-            int mp = g_ctx->mem.limit > 0
-                     ? (g_ctx->mem.total_chars * 100 / g_ctx->mem.limit) : 0;
-            int up = g_ctx->user.limit > 0
-                     ? (g_ctx->user.total_chars * 100 / g_ctx->user.limit) : 0;
+            char mu[48], uu[48];
+            if (g_ctx->mem.count > 0)
+                memfile_usage(&g_ctx->mem, mu, sizeof(mu));
+            if (g_ctx->user.count > 0)
+                memfile_usage(&g_ctx->user, uu, sizeof(uu));
             pos += os_snprintf(out + pos, out_len - pos,
                                DIM " ‖ " RST);
             if (g_ctx->mem.count > 0)
                 pos += os_snprintf(out + pos, out_len - pos,
-                                   DIM "mem %d%%" RST, mp);
+                                   DIM "mem %s" RST, mu);
             if (g_ctx->user.count > 0)
                 pos += os_snprintf(out + pos, out_len - pos,
-                                   DIM " · you %d%%" RST, up);
+                                   DIM " · you %s" RST, uu);
         }
         os_snprintf(out + pos, out_len - pos, RST);
     }

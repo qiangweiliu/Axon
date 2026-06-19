@@ -215,6 +215,24 @@ void memfile_save(const memfile_t *mf)
 void memfile_usage(const memfile_t *mf, char *buf, size_t buf_len)
 {
     int pct = mf->limit > 0 ? (mf->total_chars * 100 / mf->limit) : 0;
-    os_snprintf(buf, buf_len, "%d%% — %d/%d chars",
-                pct, mf->total_chars, mf->limit);
+    if (pct > 99) pct = 99;
+
+    /* Human-readable size */
+    int used_k = (mf->total_chars + 512) / 1024;  /* round to nearest K */
+    int limit_k = (mf->limit + 512) / 1024;
+
+    /* Progress bar: 10 blocks */
+    char bar[11];
+    int fill = pct / 10;  /* 0..9 */
+    for (int i = 0; i < 10; i++)
+        bar[i] = (i < fill) ? '#' : '-';
+    bar[10] = '\0';
+
+    if (limit_k >= 1) {
+        os_snprintf(buf, buf_len, "%dK/%dK [%s] %d%%",
+                    used_k, limit_k, bar, pct);
+    } else {
+        os_snprintf(buf, buf_len, "%d/%d [%s] %d%%",
+                    mf->total_chars, mf->limit, bar, pct);
+    }
 }
