@@ -205,7 +205,7 @@ llm_response_t *llm_chat(const char *endpoint,
         LOG_ERROR("LLM: body too large"); return NULL;
     }
 
-    LOG_INFO("LLM: POST %s:%d%s (%s) [%s] via %s",
+    LOG_DEBUG("LLM: POST %s:%d%s (%s) [%s] via %s",
              host, port, path, model, is_https ? "TLS" : "plain", m->name);
 
     /* Append /chat/completions */
@@ -249,7 +249,7 @@ llm_response_t *llm_chat(const char *endpoint,
     }
     if (!http) { LOG_ERROR("LLM: HTTP request failed"); return NULL; }
 
-    LOG_INFO("LLM: HTTP %d, body_len=%zu", http->status_code, http->body_len);
+    LOG_DEBUG("LLM: HTTP %d, body_len=%zu", http->status_code, http->body_len);
     if (http->status_code != 200 || !http->body) {
         http_response_free(http); return NULL;
     }
@@ -260,7 +260,7 @@ llm_response_t *llm_chat(const char *endpoint,
     resp->prompt_tokens = m->extract_int(http->body, "prompt_tokens");
     resp->completion_tokens = m->extract_int(http->body, "completion_tokens");
     if (!resp->content) { LOG_WARN("LLM: no content"); os_free(resp); http_response_free(http); return NULL; }
-    LOG_INFO("LLM: response (%zu chars)", resp->content_len);
+    LOG_DEBUG("LLM: response (%zu chars)", resp->content_len);
     http_response_free(http);
     return resp;
 }
@@ -294,7 +294,7 @@ llm_response_t *llm_chat_stream(const char *endpoint,
         LOG_ERROR("LLM: body too large"); return NULL;
     }
 
-    LOG_INFO("LLM: STREAM %s:%d%s (%s) [%s] via %s",
+    LOG_DEBUG("LLM: STREAM %s:%d%s (%s) [%s] via %s",
              host, port, path, model, is_https ? "TLS" : "plain", m->name);
 
     /* Append /chat/completions */
@@ -362,7 +362,7 @@ llm_response_t *llm_chat_stream(const char *endpoint,
     if (resp->completion_tokens == 0 && sp.tokens > 0)
         resp->completion_tokens = sp.tokens;
 
-    LOG_INFO("LLM: stream done (%zu chars, %d tok)",
+    LOG_DEBUG("LLM: stream done (%zu chars, %d tok)",
              resp->content_len, resp->completion_tokens);
     return resp;
 }
