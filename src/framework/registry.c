@@ -40,26 +40,6 @@ int framework_discover_modules(void)
     return g_registry.count;
 }
 
-static int cmp_priority_desc(const void *a, const void *b)
-{
-    const framework_module_t *ma = *(const framework_module_t **)a;
-    const framework_module_t *mb = *(const framework_module_t **)b;
-    return mb->priority - ma->priority;
-}
-
-int framework_sort_modules(void)
-{
-    if (g_registry.count <= 1) return 0;
-
-    os_qsort(g_registry.list, (size_t)g_registry.count,
-             sizeof(framework_module_t *), cmp_priority_desc);
-
-    for (int i = 0; i < g_registry.count; i++) {
-        g_registry.list[i]->id = (unsigned)i;
-    }
-
-    return 0;
-}
 
 framework_module_t *framework_get_module_by_index(unsigned int index)
 {

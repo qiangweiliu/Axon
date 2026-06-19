@@ -21,6 +21,7 @@ plan.md
 .idea/
 *.swp
 *.swo
+.cache/
 
 # OS
 .DS_Store

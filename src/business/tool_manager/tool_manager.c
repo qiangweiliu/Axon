@@ -219,8 +219,6 @@ static int tool_manager_deinit(framework_module_t *mod)
 }
 
     framework_module_t tool_manager_mod = {
-        .layer = LAYER_BUSINESS,
-    .offset = 1,
     .name     = "tool_manager",
     .version  = 0x00010000,
     

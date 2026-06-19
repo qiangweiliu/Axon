@@ -253,8 +253,6 @@ static int logger_init(struct framework_module *m) { (void)m; LOG_INFO("Logger: 
 static int logger_start(struct framework_module *m) { (void)m; LOG_INFO("Logger: ready"); return 0; }
 
 struct framework_module logger_mod = {
-        .layer = LAYER_CORE,
-    .offset = 0,
     .name = "logger", .version = 0x00010000,  .state = 0,
     .init = logger_init, .start = logger_start,
     .loop = NULL, .stop = NULL, .deinit = NULL, .ctx = NULL,

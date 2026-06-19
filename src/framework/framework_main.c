@@ -101,7 +101,6 @@ int framework_init(void)
     LOG_INFO("Framework: discovered %d module(s)", count);
 
     framework_bus_init();
-    framework_sort_modules();
 
     if (call_init_all() != 0) {
         LOG_ERROR("%s", "Framework: init phase failed, aborting");

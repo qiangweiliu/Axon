@@ -464,8 +464,6 @@ static int config_start(framework_module_t *mod)
 }
 
 framework_module_t config_mod = {
-        .layer = LAYER_CORE,
-    .offset = 1,
     .name     = "config",
     .version  = 0x00010000,
     

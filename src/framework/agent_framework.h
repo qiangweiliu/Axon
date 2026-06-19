@@ -38,8 +38,6 @@ typedef struct framework_module {
     int  (*stop)(struct framework_module *mod);
     int  (*deinit)(struct framework_module *mod);
 
-    unsigned int layer;   /* LAYER_APP/BUSINESS/INFRA/CORE */
-    unsigned int offset;  /* sub-priority within layer (0..99) */
     void *ctx;
     unsigned int id;
     struct framework_module *next;
@@ -48,41 +46,22 @@ typedef struct framework_module {
 /* =========================================================================
  * 3. Module Registration — ELF Section-Based
  *
- * Modules place a pointer to their framework_module_t in the .agent_modules
- * ELF section. framework_discover_modules() scans the section at init time.
- * Priority is auto-computed from layer + offset — no manual .priority needed.
- *
- * Layer → base priority (higher = earlier init):
- *   LAYER_CORE     (3) →  900  (logger, config)
- *   LAYER_INFRA    (2) →  700  (threadpool, http_client)
- *   LAYER_BUSINESS (1) →  400  (memory, tool_manager, llm_client)
- *   LAYER_APP      (0) →  100  (agent_loop)
- *
- * Offset: order within the layer (0..99).
- * Priority = layer * 300 + 100 + offset.
+ * Init order = link order (.o files in Makefile). Modules are
+ * discovered from .agent_modules ELF section in link order.
+ * No priority system needed — order is explicit in the build.
  * ========================================================================= */
 
 void _fw_module_register(framework_module_t *mod);
 
-#define LAYER_APP      0
-#define LAYER_BUSINESS 1
-#define LAYER_INFRA    2
-#define LAYER_CORE     3
-
-/* Generic: place a typed pointer into a named ELF section. */
+/* Place a typed pointer into a named ELF section. */
 #define AGENT_SECTION(section_name, type, var) \
     __attribute__((section("." section_name), used)) \
     type *_ag_sec_##var = &var
 
-/* Register a module. Priority is auto-computed from struct's
-   .layer and .offset fields (set in the struct initializer).
-   The constructor runs before main, set priority = layer*300+100+offset. */
+/* Register a module: places its pointer in .agent_modules section.
+   Init order is determined by Makefile link order (LAYERS variable). */
 #define MODULE_REGISTER(mod) \
-    AGENT_SECTION("agent_modules", framework_module_t, mod); \
-    __attribute__((constructor(65535))) \
-    static void _ag_set_prio_##mod(void) { \
-        mod.priority = (mod).layer * 300 + 100 + (mod).offset; \
-    }
+    AGENT_SECTION("agent_modules", framework_module_t, mod)
 
 /* =========================================================================
  * 4. Lifecycle API

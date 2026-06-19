@@ -785,8 +785,6 @@ void agent_set_prompt_file(const char *path)
 }
 
     framework_module_t agent_loop_mod = {
-        .layer = LAYER_APP,
-    .offset = 0,
     .name = "agent_loop", .version = 0x00040000, 
     .state = FRAMEWORK_STATE_UNLOADED, .init = agent_loop_init,
     .start = agent_loop_start, .loop = agent_loop_tick,
