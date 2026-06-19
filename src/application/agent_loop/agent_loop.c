@@ -428,16 +428,12 @@ static int handle_ask(const char *question, char *out, size_t out_len)
         pos += os_snprintf(out + pos, out_len - pos,
                            DIM "  %.1fs", (double)elapsed / 1000.0);
         if (resp->completion_tokens > 0) {
+            int total_tok = resp->completion_tokens
+                          + (resp->prompt_tokens > 0 ? resp->prompt_tokens : 0);
             pos += os_snprintf(out + pos, out_len - pos,
-                               " · %d", resp->completion_tokens);
-            if (resp->prompt_tokens > 0) {
-                pos += os_snprintf(out + pos, out_len - pos,
-                                   "/%d", resp->prompt_tokens);
-            }
-            pos += os_snprintf(out + pos, out_len - pos,
-                               " tok");
+                               " · %d tok", total_tok);
             if (elapsed > 0) {
-                double tps = (double)resp->completion_tokens /
+                double tps = (double)total_tok /
                              ((double)elapsed / 1000.0);
                 pos += os_snprintf(out + pos, out_len - pos,
                                    " · %.1f/s", tps);
