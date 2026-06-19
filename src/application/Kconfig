@@ -1,0 +1,5 @@
+# Kconfig — Application 层配置
+#
+# Application 是最顶层，调用所有下层模块。
+
+# 无额外链接标志

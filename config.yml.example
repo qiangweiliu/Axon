@@ -1,0 +1,15 @@
+# config.yml.example — Axon configuration template
+# Copy to config.yml and fill in your values:
+#   cp config.yml.example config.yml
+
+logging:
+  file: "agent.log"
+  level: info
+
+threadpool:
+  workers: 0
+
+llm:
+  endpoint: "https://your-api-endpoint.com/v1"
+  api_key: "sk-your-key-here"
+  model: "your-model-name"

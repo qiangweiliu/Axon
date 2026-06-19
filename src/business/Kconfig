@@ -1,0 +1,5 @@
+# Kconfig — Business 层配置
+#
+# Business 模块使用网络（HTTP 客户端需要 socket）。
+
+# 无额外链接标志——os_socket 已在 platform 层提供

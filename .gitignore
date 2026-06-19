@@ -1,0 +1,25 @@
+# Build
+build/
+*.o
+*.a
+*.so
+
+# Runtime
+agent.log
+prompt.txt
+data/
+
+# Personal / sensitive
+config.yml
+DESIGN.md
+plan.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,8 @@
+# layer.conf — Platform 层配置
+#
+# 声明本层的源文件和编译标志。
+
+PLATFORM_SRCS   = src/platform/os_api_posix.c
+
+CFLAGS += -D_GNU_SOURCE
+CFLAGS += -Isrc/platform

@@ -1,0 +1,5 @@
+# Kconfig — HttpClient 模块配置
+
+MODULE_SRCS = http_client.c
+
+CFLAGS += -Isrc/business/http_client

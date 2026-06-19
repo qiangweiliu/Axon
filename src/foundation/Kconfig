@@ -1,0 +1,6 @@
+# layer.conf — Foundation 层配置
+#
+# Foundation 模块使用 POSIX 线程，链接时需要 -lpthread。
+
+FOUNDATION_LDFLAGS = -lpthread
+LDFLAGS += $(FOUNDATION_LDFLAGS)

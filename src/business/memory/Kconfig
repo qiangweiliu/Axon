@@ -1,0 +1,5 @@
+# Kconfig — Memory 模块配置
+
+MODULE_SRCS = memory.c backend_file.c
+
+CFLAGS += -Isrc/business/memory

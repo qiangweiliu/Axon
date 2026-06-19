@@ -1,0 +1,5 @@
+# module.conf — ThreadPool 模块配置
+
+MODULE_SRCS = threadpool.c
+
+CFLAGS += -Isrc/foundation/threadpool

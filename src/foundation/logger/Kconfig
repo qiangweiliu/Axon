@@ -1,0 +1,6 @@
+# module.conf — Logger 模块配置
+
+MODULE_SRCS = logger.c
+
+# 模块头文件路径
+CFLAGS += -Isrc/foundation/logger

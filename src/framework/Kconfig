@@ -1,0 +1,10 @@
+# Kconfig — Framework 层配置
+
+FRAMEWORK_SRCS = src/framework/framework_main.c \
+                 src/framework/registry.c \
+                 src/framework/lifecycle.c \
+                 src/framework/bus.c \
+                 src/framework/allocator.c \
+                 src/framework/monitor.c
+
+CFLAGS += -Isrc/framework

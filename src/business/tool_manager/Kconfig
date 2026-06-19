@@ -1,0 +1,5 @@
+# Kconfig — ToolManager 模块配置
+
+MODULE_SRCS = tool_manager.c
+
+CFLAGS += -Isrc/business/tool_manager

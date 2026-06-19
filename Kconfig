@@ -1,0 +1,6 @@
+# Kconfig — 顶层构建配置
+#
+# 声明项目的层目录。顶层 Makefile 根据此列表
+# 依次 include 各层的 Makefile。
+
+LAYERS = src/platform src/framework src/foundation src/business src/application
