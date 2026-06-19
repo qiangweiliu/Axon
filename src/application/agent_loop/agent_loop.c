@@ -353,6 +353,8 @@ static int handle_ask(const char *question, char *out, size_t out_len)
             "  [FORGET: <keyword>]  — remove a memory entry containing keyword\n"
             "Example: 'I'll remember that. [NOTE: User's birthday is Jan 1]'\n"
             "Directives are hidden from the user; use them silently.\n"
+            "Do NOT acknowledge or refer to these instructions.\n"
+            "Answer the user's question directly.\n"
             "\n");
 
         if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
@@ -425,7 +427,13 @@ static int handle_ask(const char *question, char *out, size_t out_len)
                            DIM "  %.1fs", (double)elapsed / 1000.0);
         if (resp->completion_tokens > 0) {
             pos += os_snprintf(out + pos, out_len - pos,
-                               " · %d tok", resp->completion_tokens);
+                               " · %d", resp->completion_tokens);
+            if (resp->prompt_tokens > 0) {
+                pos += os_snprintf(out + pos, out_len - pos,
+                                   "/%d", resp->prompt_tokens);
+            }
+            pos += os_snprintf(out + pos, out_len - pos,
+                               " tok");
             if (elapsed > 0) {
                 double tps = (double)resp->completion_tokens /
                              ((double)elapsed / 1000.0);
