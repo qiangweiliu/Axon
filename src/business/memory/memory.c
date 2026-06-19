@@ -111,6 +111,8 @@ static int memory_stop(framework_module_t *mod)
 }
 
     framework_module_t memory_mod = {
+        .layer = LAYER_BUSINESS,
+    .offset = 0,
     .name     = "memory",
     .version  = 0x00010000,
     
@@ -125,4 +127,4 @@ static int memory_stop(framework_module_t *mod)
     .next     = NULL,
 };
 
-MODULE_REGISTER(memory_mod, LAYER_BUSINESS, 0);
+MODULE_REGISTER(memory_mod);

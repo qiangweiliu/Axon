@@ -429,6 +429,8 @@ static int http_client_start(framework_module_t *mod)
 }
 
     framework_module_t http_client_mod = {
+        .layer = LAYER_INFRA,
+    .offset = 1,
     .name     = "http_client",
     .version  = 0x00020000,
     
@@ -439,4 +441,4 @@ static int http_client_start(framework_module_t *mod)
     .ctx      = NULL, .id = 0, .next = NULL,
 };
 
-MODULE_REGISTER(http_client_mod, LAYER_INFRA, 1);
+MODULE_REGISTER(http_client_mod);

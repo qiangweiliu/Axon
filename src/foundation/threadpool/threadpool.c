@@ -334,6 +334,8 @@ static int threadpool_deinit(framework_module_t *mod)
 }
 
     framework_module_t threadpool_mod = {
+        .layer = LAYER_INFRA,
+    .offset = 0,
     .name    = "threadpool",
     .version = 0x00010000,
     
@@ -348,4 +350,4 @@ static int threadpool_deinit(framework_module_t *mod)
     .next    = NULL,
 };
 
-MODULE_REGISTER(threadpool_mod, LAYER_INFRA, 0);
+MODULE_REGISTER(threadpool_mod);

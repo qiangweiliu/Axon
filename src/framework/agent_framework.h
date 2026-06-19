@@ -38,9 +38,10 @@ typedef struct framework_module {
     int  (*stop)(struct framework_module *mod);
     int  (*deinit)(struct framework_module *mod);
 
+    unsigned int layer;   /* LAYER_APP/BUSINESS/INFRA/CORE */
+    unsigned int offset;  /* sub-priority within layer (0..99) */
     void *ctx;
     unsigned int id;
-    uint8_t reserved[12];
     struct framework_module *next;
 } framework_module_t;
 
@@ -73,16 +74,15 @@ void _fw_module_register(framework_module_t *mod);
     __attribute__((section("." section_name), used)) \
     type *_ag_sec_##var = &var
 
-/* Register a module with layer-based priority.
-   layer:  LAYER_APP(0) .. LAYER_CORE(3), see constants above.
-   offset: sub-priority within the layer (0..99).
-   The macro computes priority = layer * 300 + 100 + offset and
-   sets mod.priority via a minimal constructor (runs before main).
-   Do NOT set .priority in the struct — the macro overrides it. */
-#define MODULE_REGISTER(mod, layer, offset) \
+/* Register a module. Priority is auto-computed from struct's
+   .layer and .offset fields (set in the struct initializer).
+   The constructor runs before main, set priority = layer*300+100+offset. */
+#define MODULE_REGISTER(mod) \
     AGENT_SECTION("agent_modules", framework_module_t, mod); \
     __attribute__((constructor(65535))) \
-    static void _ag_set_prio_##mod(void) { mod.priority = (layer) * 300 + 100 + (offset); }
+    static void _ag_set_prio_##mod(void) { \
+        mod.priority = (mod).layer * 300 + 100 + (mod).offset; \
+    }
 
 /* =========================================================================
  * 4. Lifecycle API

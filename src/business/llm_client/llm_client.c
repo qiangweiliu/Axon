@@ -380,10 +380,12 @@ static int llm_client_stop(framework_module_t *mod)
     (void)mod; LOG_INFO("LLM: stop"); return 0;
 }
     framework_module_t llm_client_mod = {
+        .layer = LAYER_BUSINESS,
+    .offset = 2,
     .name = "llm_client", .version = 0x00020000, 
     .state = FRAMEWORK_STATE_UNLOADED, .init = llm_client_init,
     .start = llm_client_start, .loop = NULL,
     .stop = llm_client_stop, .deinit = NULL,
     .ctx = NULL, .id = 0, .next = NULL,
 };
-MODULE_REGISTER(llm_client_mod, LAYER_BUSINESS, 2);
+MODULE_REGISTER(llm_client_mod);

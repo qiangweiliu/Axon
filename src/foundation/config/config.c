@@ -464,6 +464,8 @@ static int config_start(framework_module_t *mod)
 }
 
 framework_module_t config_mod = {
+        .layer = LAYER_CORE,
+    .offset = 1,
     .name     = "config",
     .version  = 0x00010000,
     
@@ -478,4 +480,4 @@ framework_module_t config_mod = {
     .next     = NULL,
 };
 
-MODULE_REGISTER(config_mod, LAYER_CORE, 1);
+MODULE_REGISTER(config_mod);
