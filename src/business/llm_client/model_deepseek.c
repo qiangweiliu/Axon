@@ -35,8 +35,10 @@ static int deepseek_build_body(char *buf, size_t buf_len,
 
 /* ── Extract content ────────────────────────────────────────────── */
 
-static char* deepseek_extract_content(const char *json, size_t *out_len)
+static char* deepseek_extract_content(const char *json, size_t *out_len,
+                                      int *out_is_reasoning)
 {
+    if (out_is_reasoning) *out_is_reasoning = 0;
     /* Try "content" first (final response text) */
     const char *key = "\"content\":\"";
     const char *start = NULL, *p = json;
@@ -61,6 +63,7 @@ static char* deepseek_extract_content(const char *json, size_t *out_len)
         }
     }
 
+    if (out_is_reasoning) *out_is_reasoning = 1;
     /* Fallback: show reasoning_content for real-time thinking */
     key = "\"reasoning_content\":\"";
     p = json;

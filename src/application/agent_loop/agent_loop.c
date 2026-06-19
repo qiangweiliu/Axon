@@ -55,6 +55,7 @@ typedef struct {
     int  tick_count;
     int  session_tokens;
     int  first_token;
+    int  saw_reasoning;   /* track transition reasoning→content */
 } agent_loop_ctx_t;
 
 static agent_loop_ctx_t *g_ctx = NULL;
@@ -297,16 +298,29 @@ static void handle_notes(char *out, size_t out_len)
 
 static void on_llm_token(const char *token, size_t len,
                          int tokens_so_far, uint64_t elapsed_ms,
+                         int is_reasoning,
                          void *user)
 {
     (void)len; (void)tokens_so_far; (void)elapsed_ms; (void)user;
     if (!g_ctx->first_token) {
         g_ctx->first_token = 1;
+        g_ctx->saw_reasoning = 0;
         g_spinner_on = 0;
         os_sleep_ms(300);
-        os_printf("\033[K");  /* clear the spinner line (keep prompt above) */
+        os_printf("\033[K");  /* clear the spinner line */
     }
-    /* Convert literal \n to actual newlines */
+
+    /* Transition from reasoning to content: 2 blank lines gap */
+    if (g_ctx->saw_reasoning && !is_reasoning) {
+        os_printf("\n\n");
+        g_ctx->saw_reasoning = 2;  /* mark gap done */
+    }
+    if (is_reasoning) g_ctx->saw_reasoning = 1;
+
+    /* Convert literal \n to actual newlines, apply color */
+    const char *prefix = is_reasoning ? DIM : "";
+    const char *suffix = is_reasoning ? RST : "";
+    os_printf("%s", prefix);
     for (const char *p = token; *p; p++) {
         if (*p == '\\' && (*(p+1) == 'n' || *(p+1) == 'N')) {
             os_printf("\n");
@@ -315,6 +329,7 @@ static void on_llm_token(const char *token, size_t len,
             os_printf("%c", *p);
         }
     }
+    os_printf("%s", suffix);
     fflush(stdout);
 }
 

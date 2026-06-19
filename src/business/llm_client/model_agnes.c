@@ -36,7 +36,8 @@ static int agnes_build_body(char *buf, size_t buf_len,
 /* ── Extract content ────────────────────────────────────────────── */
 /* Standard OpenAI: just "content" field */
 
-static char* agnes_extract_content(const char *json, size_t *out_len)
+static char* agnes_extract_content(const char *json, size_t *out_len,
+                                   int *out_is_reasoning)
 {
     const char *key = "\"content\":\"";
     const char *start = NULL, *p = json;

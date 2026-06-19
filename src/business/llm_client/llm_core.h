@@ -29,7 +29,11 @@ typedef struct {
 
     /* Extract text content from response JSON.
        Returns malloc'd string, caller frees. NULL if no content. */
-    char* (*extract_content)(const char *json, size_t *out_len);
+    /* Extract text content from response JSON. Sets *out_is_reasoning
+       to 1 if the content is reasoning/thinking (chain-of-thought),
+       0 for final answer content. Caller frees the returned string. */
+    char* (*extract_content)(const char *json, size_t *out_len,
+                             int *out_is_reasoning);
 
     /* Extract an integer field from response JSON.
        Returns the value, or 0 if not found. */

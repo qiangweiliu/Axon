@@ -144,13 +144,15 @@ static void sse_feed(sse_parser_t *sp, const char *data, size_t len)
                         { *end = '\0'; end--; }
                     if (os_strcmp(json, "[DONE]") == 0) { sp->done = 1; }
                     else {
-                        char *content = m->extract_content(json, NULL);
+                        int extracted_is_reasoning = 0;
+                        char *content = m->extract_content(json, NULL, &extracted_is_reasoning);
                         if (content && content[0]) {
                             sp->tokens++;
                             uint64_t elapsed = os_clock_ms() - sp->t0;
                             if (sp->cb)
                                 sp->cb(content, os_strlen(content),
-                                       sp->tokens, elapsed, sp->cb_user);
+                                       sp->tokens, elapsed,
+                                       extracted_is_reasoning, sp->cb_user);
                             size_t clen = os_strlen(content);
                             if (sp->accum_len + clen + 1 > sp->accum_cap) {
                                 sp->accum_cap = sp->accum_len + clen + 8192;
@@ -256,7 +258,8 @@ llm_response_t *llm_chat(const char *endpoint,
 
     llm_response_t *resp = (llm_response_t *)os_calloc(1, sizeof(*resp));
     if (!resp) { http_response_free(http); return NULL; }
-    resp->content = m->extract_content(http->body, &resp->content_len);
+    int dummy_is_reasoning = 0;
+    resp->content = m->extract_content(http->body, &resp->content_len, &dummy_is_reasoning);
     resp->prompt_tokens = m->extract_int(http->body, "prompt_tokens");
     resp->completion_tokens = m->extract_int(http->body, "completion_tokens");
     if (!resp->content) { LOG_WARN("LLM: no content"); os_free(resp); http_response_free(http); return NULL; }

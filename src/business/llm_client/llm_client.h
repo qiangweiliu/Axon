@@ -46,6 +46,7 @@ llm_response_t *llm_chat(const char *endpoint,
  */
 typedef void (*llm_token_cb_t)(const char *token, size_t len,
                                int tokens_so_far, uint64_t elapsed_ms,
+                               int is_reasoning,
                                void *user);
 llm_response_t *llm_chat_stream(const char *endpoint,
                                 const char *api_key,
