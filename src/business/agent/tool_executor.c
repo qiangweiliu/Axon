@@ -10,6 +10,7 @@
 #include "config.h"
 #include "os_api.h"
 #include "agent_framework.h"
+#include <stdio.h>
 #include <string.h>
 
 /*
@@ -259,7 +260,8 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
         } else {
             os_snprintf(show, sizeof(show), "%s", call->args_json);
         }
-        os_printf("\n  \033[2m⚙ %s %s\033[0m\n", call->name, show);
+        os_printf("\n  \033[2m⚙ %s %s\033[0m", call->name, show);
+        fflush(stdout);
     }
 
     /* 1. Validate tool exists */
@@ -333,6 +335,9 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
     int rc = tool_call(call->name, call->args_json, tool_output, sizeof(tool_output));
     LOG_DEBUG("ToolExec: execute_call — tool_call() rc=%d, output_len=%zu",
               rc, tool_output[0] ? os_strlen(tool_output) : 0);
+    /* Completion indicator: overwrite the "⚙ name args" line with result */
+    os_printf("\r  \033[2m⚙ %s\033[0m %s\n",
+              call->name, rc < 0 ? "\033[31m✗\033[0m" : "\033[32m✓\033[0m");
     if (rc < 0) {
         LOG_DEBUG("ToolExec: execute_call — execution failed (rc=%d)", rc);
         os_snprintf(result, result_len,

@@ -554,9 +554,17 @@ int handle_ask(const char *question, char *out, size_t out_len)
     os_thread_join(tid);
     if (resp) resp->latency_ms = elapsed;
 
-    /* Streaming produced no tokens — notify user we're retrying */
+    /* Streaming produced no tokens — animate a retry indicator while
+     * the non-streaming fallback (already completed inside llm_chat_stream)
+     * or just give the user visual feedback that the response arrived. */
     if (!g_ctx->first_token && resp) {
-        os_printf("\r  \033[2m⏳ retrying...\033[0m");
+        const char *frames[] = {"⏳", "⌛"};
+        for (int fi = 0; fi < 4; fi++) {
+            os_printf("\r  \033[2m%s retrying\033[0m", frames[fi & 1]);
+            fflush(stdout);
+            os_sleep_ms(200);
+        }
+        os_printf("\r                    \r");
         fflush(stdout);
     }
 
