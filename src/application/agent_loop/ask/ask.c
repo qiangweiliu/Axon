@@ -554,6 +554,12 @@ int handle_ask(const char *question, char *out, size_t out_len)
     os_thread_join(tid);
     if (resp) resp->latency_ms = elapsed;
 
+    /* Streaming produced no tokens — notify user we're retrying */
+    if (!g_ctx->first_token && resp) {
+        os_printf("\r  \033[2m⏳ retrying...\033[0m");
+        fflush(stdout);
+    }
+
     if (!resp) {
         if (out) os_snprintf(out, out_len, RED "%% LLM unavailable" RST);
         if (g_ctx->saw_reasoning >= 2) print_answer_bottom();

@@ -207,14 +207,13 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
     LOG_DEBUG("ToolExec: execute_call tool='%s' args='%s'",
               call->name, call->args_json);
 
-    /* Visual tool indicator: show tool name + actual command/args */
+    /* Visual tool indicator on stdout: show tool name + actual command/args */
     {
         char show[256];
         if (os_strcmp(call->name, "bash") == 0) {
-            /* Extract command value from args_json for display */
             const char *cs = strstr(call->args_json, "\"command\":\"");
             if (cs) {
-                cs += 11;  /* skip "command":" */
+                cs += 11;
                 size_t i = 0;
                 while (cs[i] && cs[i] != '"' && i < sizeof(show) - 1)
                     { show[i] = cs[i]; i++; }
@@ -260,7 +259,7 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
         } else {
             os_snprintf(show, sizeof(show), "%s", call->args_json);
         }
-        os_fprintf_stderr("\n  \033[2m⚙ %s %s\033[0m\n", call->name, show);
+        os_printf("\n  \033[2m⚙ %s %s\033[0m\n", call->name, show);
     }
 
     /* 1. Validate tool exists */
