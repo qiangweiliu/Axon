@@ -141,9 +141,11 @@ int agent_run(const char *endpoint,
             }
         }
         *dst = '\0';
-        os_snprintf(answer, answer_len,
-            "%s", clean[0] ? clean : "[Completed after %d tool call(s)]",
-            depth);
+        if (clean[0])
+            os_snprintf(answer, answer_len, "%s", clean);
+        else
+            os_snprintf(answer, answer_len,
+                        "[Completed after %d tool call(s)]", depth);
     }
     return 1;
 }
