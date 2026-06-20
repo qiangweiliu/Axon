@@ -10,10 +10,19 @@
 #include "framework_internal.h"
 #include "os_api.h"
 #include "http_client.h"
+#include <string.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
 
-#define RECV_BUF    32768
+#define RECV_BUF        65536
+
+/* Default timeout, can be overridden via http_set_timeout() */
+static int g_http_timeout_sec = 120;
+
+void http_set_timeout(int timeout_sec) {
+    if (timeout_sec > 0) g_http_timeout_sec = timeout_sec;
+}
 #define HEADER_MAX  4096
 
 static int atoi_simple(const char *s)
@@ -324,6 +333,8 @@ static http_response_t *http_request(const char *method,
 
     os_socket_t fd = os_socket_create(2, 1, 0);
     if (fd < 0) return NULL;
+
+    os_socket_set_timeout(fd, g_http_timeout_sec);
 
     char ip[64];
     if (os_resolve_host(host, ip, sizeof(ip)) != 0) {

@@ -229,6 +229,9 @@ static void parse_line(char *line, void *user)
             if (vlen < sizeof(g_ctx->cfg.llm_model)) {
                 os_memcpy(g_ctx->cfg.llm_model, val, vlen + 1);
             }
+        } else if (os_strcmp(key, "timeout") == 0) {
+            g_ctx->cfg.llm_timeout_sec = parse_int(val);
+            if (g_ctx->cfg.llm_timeout_sec <= 0) g_ctx->cfg.llm_timeout_sec = 120;
         }
     }
     /* ── skills: ── */

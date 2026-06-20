@@ -56,6 +56,9 @@ ssize_t os_socket_recv(os_socket_t fd, void *buf, size_t len, int flags);
 ssize_t os_socket_send(os_socket_t fd, const void *buf, size_t len, int flags);
 int os_socket_close(os_socket_t fd);
 
+/* Set receive/send timeout on a socket (in seconds) */
+int os_socket_set_timeout(os_socket_t fd, int timeout_sec);
+
 /* DNS resolution */
 int os_resolve_host(const char *hostname, char *ip_out, size_t ip_len);
 

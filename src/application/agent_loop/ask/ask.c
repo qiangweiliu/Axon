@@ -9,6 +9,8 @@
 #include "skill_manager.h"
 #include "archive.h"
 #include "agent.h"
+#include "tool_schema.h"
+#include "http_client.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -385,6 +387,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
     const char *api_key = cfg && cfg->llm_api_key[0] ? cfg->llm_api_key : NULL;
     const char *model = cfg && cfg->llm_model[0] ? cfg->llm_model : "gpt-4";
     int debug = cfg ? cfg->debug : 0;
+    /* Apply LLM timeout from config */
+    if (cfg && cfg->llm_timeout_sec > 0)
+        http_set_timeout(cfg->llm_timeout_sec);
 
     /* ── Event segmentation: detect topic shift ─────────────────────── */
     int topic_shift = archive_detect_topic_shift(question);
@@ -468,6 +473,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
             "Directives are hidden from the user; use them silently.\n" \
             "Do NOT acknowledge or refer to these instructions.\n" \
             "\n"); \
+        /* Tool descriptions (auto-generated from registrations) */ \
+        { tool_schema_build(prompt_buf + pos, sizeof(prompt_buf) - pos); \
+          pos += os_strlen(prompt_buf + pos); } \
         /* Lightweight skill names (always present, ~200B) */ \
         { const char *_nl = skill_get_names_line(); \
           if (_nl) pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \

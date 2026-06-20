@@ -48,4 +48,7 @@ int https_post_stream(const char *host, int port,
                       const char *extra_headers,
                       http_chunk_cb_t on_chunk, void *user);
 
+/* Override the default socket timeout (seconds). 0 = keep default (120). */
+void http_set_timeout(int timeout_sec);
+
 #endif /* BUSINESS_HTTP_CLIENT_H */

@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <sys/time.h>
 
 /* =========================================================================
  * 文件操作
@@ -175,6 +176,18 @@ ssize_t os_socket_send(os_socket_t fd, const void *buf, size_t len, int flags) {
 
 int os_socket_close(os_socket_t fd) {
     return close(fd);
+}
+
+int os_socket_set_timeout(os_socket_t fd, int timeout_sec) {
+    if (timeout_sec <= 0) return 0;
+    struct timeval tv;
+    tv.tv_sec = timeout_sec;
+    tv.tv_usec = 0;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0)
+        return -1;
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0)
+        return -1;
+    return 0;
 }
 
 /* =========================================================================

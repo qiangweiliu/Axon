@@ -23,6 +23,7 @@ typedef struct {
     char     llm_endpoint[256];
     char     llm_api_key[256];
     char     llm_model[128];
+    int      llm_timeout_sec;   /* HTTP socket timeout, default 120 */
 
     /* skills: */
     char     skills_dir[256];
