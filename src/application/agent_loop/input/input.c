@@ -15,9 +15,8 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
-#include "ansi.h"
-#include "input.h"
 #include "os_api.h"
+#include "input.h"
 
 typedef struct {
     struct termios orig_tio;
@@ -49,16 +48,16 @@ static int  g_history_pos = -1;
 void history_add(const char *line)
 {
     if (!line || !*line) return;
-    size_t len = strlen(line);
+    size_t len = os_strlen(line);
     if (len >= LINE_MAX) len = LINE_MAX - 1;
 
     /* Skip duplicate of most recent entry */
     if (g_history_count > 0 &&
-        strcmp(g_history[(g_history_count - 1) % HISTORY_MAX], line) == 0)
+        os_strcmp(g_history[(g_history_count - 1) % HISTORY_MAX], line) == 0)
         return;
 
     int slot = g_history_count % HISTORY_MAX;
-    memcpy(g_history[slot], line, len);
+    os_memcpy(g_history[slot], line, len);
     g_history[slot][len] = '\0';
     g_history_count++;
     g_history_pos = -1;
@@ -70,9 +69,9 @@ static int history_load(int offset, char *buf, int max)
     if (offset < 0 || offset >= g_history_count || offset >= HISTORY_MAX)
         return -1;
     int idx = (g_history_count - 1 - offset) % HISTORY_MAX;
-    size_t len = strlen(g_history[idx]);
+    size_t len = os_strlen(g_history[idx]);
     if (len >= (size_t)max) len = (size_t)max - 1;
-    memcpy(buf, g_history[idx], len);
+    os_memcpy(buf, g_history[idx], len);
     buf[len] = '\0';
     return (int)len;
 }
@@ -196,7 +195,7 @@ static void on_escape(char seq1, char seq2,
             /* Save current input when first entering history */
             if (g_history_pos == -1) {
                 g_history_saved_len = *len;
-                memcpy(g_history_saved, buf, (size_t)(*len) + 1);
+                os_memcpy(g_history_saved, buf, (size_t)(*len) + 1);
                 g_history_pos = 0;
             } else if (g_history_pos < g_history_count - 1 &&
                        g_history_pos < HISTORY_MAX - 1) {
@@ -216,7 +215,7 @@ static void on_escape(char seq1, char seq2,
                 /* Restore saved input */
                 g_history_pos = -1;
                 *len = g_history_saved_len;
-                memcpy(buf, g_history_saved, (size_t)(*len) + 1);
+                os_memcpy(buf, g_history_saved, (size_t)(*len) + 1);
                 *cursor = *len;
             } else {
                 g_history_pos--;
@@ -259,7 +258,7 @@ int read_line_raw(char *buf, int max)
     /* Fallback: if not in raw mode (pipe), use fgets */
     if (!g_ctx->in_raw) {
         if (!fgets(buf, max, stdin)) return -1;
-        size_t len = strlen(buf);
+        size_t len = os_strlen(buf);
         while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r'))
             buf[--len] = '\0';
         return (int)len;
