@@ -311,6 +311,17 @@ const config_t *config_get(void)
     return g_ctx ? &g_ctx->cfg : NULL;
 }
 
+const config_t *config_reload(void)
+{
+    if (!g_ctx) return NULL;
+    LOG_INFO("Config: reloading config.yml");
+    parse_config("config.yml");
+    LOG_INFO("Config: reloaded (model=%s, debug=%s)",
+             g_ctx->cfg.llm_model,
+             g_ctx->cfg.debug ? "on" : "off");
+    return &g_ctx->cfg;
+}
+
 int config_set(const char *key, const char *value)
 {
     if (!key || !value) return -1;

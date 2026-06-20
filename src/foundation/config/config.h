@@ -38,6 +38,9 @@ typedef struct {
 /* Returns the global parsed config. NULL before config module init. */
 const config_t *config_get(void);
 
+/* Re-read config.yml at runtime. Returns updated config. */
+const config_t *config_reload(void);
+
 /* Write a config value back to config.yml. Key is dotted: "llm.endpoint".
    Returns 0 on success, -1 on failure. */
 int config_set(const char *key, const char *value);

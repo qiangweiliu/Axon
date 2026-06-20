@@ -45,6 +45,16 @@ static int process_line(const char *line, char *out, size_t out_len)
         handle_forget("", out, out_len);
     } else if (os_strncmp(line, "echo ", 5) == 0) {
         handle_echo(line + 5, out, out_len);
+    } else if (os_strcmp(line, "reload") == 0) {
+        const config_t *new_cfg = config_reload();
+        if (new_cfg) {
+            if (out) os_snprintf(out, out_len,
+                GRN "✓ config reloaded" RST " (model=%s, debug=%s)",
+                new_cfg->llm_model,
+                new_cfg->debug ? "on" : "off");
+        } else {
+            if (out) os_snprintf(out, out_len, RED "✗ reload failed" RST);
+        }
     } else if (os_strncmp(line, "remember ", 9) == 0) {
         handle_remember(line + 9, out, out_len);
     } else if (os_strncmp(line, "recall ", 7) == 0) {
