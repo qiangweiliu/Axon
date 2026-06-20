@@ -207,8 +207,61 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
     LOG_DEBUG("ToolExec: execute_call tool='%s' args='%s'",
               call->name, call->args_json);
 
-    /* Visual tool indicator on stderr (debug UI) */
-    os_fprintf_stderr("\n  \033[2m⚙ %s\033[0m\n", call->name);
+    /* Visual tool indicator: show tool name + actual command/args */
+    {
+        char show[256];
+        if (os_strcmp(call->name, "bash") == 0) {
+            /* Extract command value from args_json for display */
+            const char *cs = strstr(call->args_json, "\"command\":\"");
+            if (cs) {
+                cs += 11;  /* skip "command":" */
+                size_t i = 0;
+                while (cs[i] && cs[i] != '"' && i < sizeof(show) - 1)
+                    { show[i] = cs[i]; i++; }
+                show[i] = '\0';
+            } else {
+                os_snprintf(show, sizeof(show), "%s", call->args_json);
+            }
+        } else if (os_strcmp(call->name, "echo") == 0) {
+            os_snprintf(show, sizeof(show), "%s", call->args_json);
+        } else if (os_strcmp(call->name, "write_file") == 0) {
+            const char *ps = strstr(call->args_json, "\"path\":\"");
+            if (ps) {
+                ps += 8;
+                size_t i = 0;
+                while (ps[i] && ps[i] != '"' && i < sizeof(show) - 1)
+                    { show[i] = ps[i]; i++; }
+                show[i] = '\0';
+            } else {
+                os_snprintf(show, sizeof(show), "%s", call->args_json);
+            }
+        } else if (os_strcmp(call->name, "list_dir") == 0) {
+            const char *ps = strstr(call->args_json, "\"path\":\"");
+            if (ps) {
+                ps += 8;
+                size_t i = 0;
+                while (ps[i] && ps[i] != '"' && i < sizeof(show) - 1)
+                    { show[i] = ps[i]; i++; }
+                show[i] = '\0';
+            } else {
+                os_snprintf(show, sizeof(show), ".");
+            }
+        } else if (os_strcmp(call->name, "read_file") == 0) {
+            const char *ps = strstr(call->args_json, "\"path\":\"");
+            if (ps) {
+                ps += 8;
+                size_t i = 0;
+                while (ps[i] && ps[i] != '"' && i < sizeof(show) - 1)
+                    { show[i] = ps[i]; i++; }
+                show[i] = '\0';
+            } else {
+                os_snprintf(show, sizeof(show), "%s", call->args_json);
+            }
+        } else {
+            os_snprintf(show, sizeof(show), "%s", call->args_json);
+        }
+        os_fprintf_stderr("\n  \033[2m⚙ %s %s\033[0m\n", call->name, show);
+    }
 
     /* 1. Validate tool exists */
     tool_info_t info;
