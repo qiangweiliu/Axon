@@ -422,6 +422,53 @@ int handle_ask(const char *question, char *out, size_t out_len)
     #define CTX_HIST_MAX 3
     static char g_ctx_history[CTX_HIST_MAX * 2][4096];  /* alternating user/assistant */
     static int  g_ctx_hist_count = 0;
+    static int  g_session_init = 0;
+
+    /* Restore conversation history from data/session.json */
+    void session_load(void)
+    {
+        os_file_handle_t fh = os_file_open("data/session.json", "r");
+        if (!fh) return;
+        char buf[16384];
+        size_t nr = os_file_read(fh, buf, sizeof(buf) - 1);
+        os_file_close(fh);
+        if (nr == 0) return;
+        buf[nr] = '\0';
+        const char *p = buf;
+        g_ctx_hist_count = 0;
+        while (*p && g_ctx_hist_count < CTX_HIST_MAX * 2) {
+            const char *q1 = strstr(p, "\"");
+            if (!q1) break;
+            q1++;
+            const char *q2 = strstr(q1, "\"");
+            if (!q2) break;
+            size_t len = (size_t)(q2 - q1);
+            if (len >= 4096) len = 4095;
+            os_memcpy(g_ctx_history[g_ctx_hist_count], q1, len);
+            g_ctx_history[g_ctx_hist_count][len] = '\0';
+            g_ctx_hist_count++;
+            p = q2 + 1;
+        }
+    }
+    if (!g_session_init) { g_session_init = 1; session_load(); }
+
+    /* Save conversation history to data/session.json */
+    void session_save(void)
+    {
+        os_file_handle_t fh = os_file_open("data/session.json", "w");
+        if (!fh) return;
+        os_file_write(fh, "[\n", 2);
+        for (int i = 0; i < g_ctx_hist_count; i++) {
+            char line[4220];
+            int n = os_snprintf(line, sizeof(line),
+                "  \"%s\"%s\n",
+                g_ctx_history[i],
+                i < g_ctx_hist_count - 1 ? "," : "");
+            os_file_write(fh, line, (size_t)n);
+        }
+        os_file_write(fh, "]\n", 2);
+        os_file_close(fh);
+    }
 
     int topic_shift = archive_detect_topic_shift(question);
     if (topic_shift) {
@@ -511,10 +558,13 @@ int handle_ask(const char *question, char *out, size_t out_len)
         /* Tool descriptions (auto-generated from registrations) */ \
         { tool_schema_build(prompt_buf + pos, sizeof(prompt_buf) - pos); \
           pos += os_strlen(prompt_buf + pos); } \
-        /* Lightweight skill names (always present, ~200B) */ \
+        /* Skill index — tell LLM how to load & use skills */ \
         { const char *_nl = skill_get_names_line(); \
           if (_nl) pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
-              "Skills: %s\n\n", _nl); } \
+              "Available skills: %s\n" \
+              "To use a skill, output [SKILL:name] at the end of your reply.\n" \
+              "The skill's instructions will be loaded and you can follow them.\n\n", \
+              _nl); } \
         /* Language instruction */ \
         { pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
             "The user's language is %s. Respond in %s.\n\n", \
@@ -912,6 +962,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
                             "User: %s", question);
                 os_snprintf(g_ctx_history[g_ctx_hist_count++], 4096,
                             "Assistant: %s", agent_answer);
+                session_save();
             }
             llm_response_free(resp);
             return 0;
@@ -1003,6 +1054,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
                     "User: %s", question);
         os_snprintf(g_ctx_history[g_ctx_hist_count++], 4096,
                     "Assistant: %s", resp->content);
+        session_save();
     }
     if (out && resp) {
         size_t pos = 0;
