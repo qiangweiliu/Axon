@@ -2,8 +2,12 @@
  * http_client.c — HTTP/1.1 + HTTPS client
  *
  * HTTP:  raw TCP via os_socket.
- * HTTPS: pipes through openssl s_client (zero library deps).
+ * HTTPS: pipes through curl (openssl s_client is unreliable on WSL).
  * Parses status line, Content-Length, reads body.
+ *
+ * Revision: 2026-06-20 — HTTPS switched from openssl s_client to curl
+ * because openssl s_client with pipe subprocess does not produce output
+ * on WSL (Win32 OpenSSL 1.1.1f).
  */
 
 #include "agent_framework.h"
@@ -12,10 +16,14 @@
 #include "http_client.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/select.h>
+#include <errno.h>
 
 #define RECV_BUF        65536
+#define HEADER_MAX      4096
 
 /* Default timeout, can be overridden via http_set_timeout() */
 static int g_http_timeout_sec = 120;
@@ -23,118 +31,74 @@ static int g_http_timeout_sec = 120;
 void http_set_timeout(int timeout_sec) {
     if (timeout_sec > 0) g_http_timeout_sec = timeout_sec;
 }
-#define HEADER_MAX  4096
 
 static int atoi_simple(const char *s)
 {
     int n = 0;
+    if (!s) return 0;
     while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; }
     return n;
 }
 
-/* Simple chunked transfer decoding: buf is modified in-place.
-   Returns length of decoded body (without chunk headers/trailers). */
-static size_t dechunk(char *buf)
-{
-    char *src = buf, *dst = buf;
-    while (*src) {
-        long size = 0;
-        while (*src >= '0' && *src <= '9') { size = size * 16 + (*src - '0'); src++; }
-        while (*src >= 'a' && *src <= 'f') { size = size * 16 + (*src - 'a' + 10); src++; }
-        while (*src >= 'A' && *src <= 'F') { size = size * 16 + (*src - 'A' + 10); src++; }
-        while (*src == '\r' || *src == '\n') src++;
-        if (size <= 0) break;
-        char *chunk_end = src + size;
-        while (src < chunk_end && *src) *dst++ = *src++;
-        while (*src == '\r' || *src == '\n') src++;
-    }
-    *dst = '\0';
-    return (size_t)(dst - buf);
-}
-
-static int str_case_prefix(const char *s, const char *prefix)
-{
-    while (*prefix) {
-        char a = *s++, b = *prefix++;
-        if (a >= 'A' && a <= 'Z') a += 32;
-        if (b >= 'A' && b <= 'Z') b += 32;
-        if (a != b) return 0;
-    }
-    return 1;
-}
-
-static int parse_status(const char *response)
-{
-    const char *p = response;
-    while (*p && *p != ' ') p++;
-    if (*p == ' ') p++;
-    return atoi_simple(p);
-}
-
-static int parse_content_length(const char *headers)
-{
-    const char *p = headers;
-    while (*p) {
-        if (str_case_prefix(p, "content-length:")) {
-            p += 15; while (*p == ' ' || *p == '\t') p++;
-            return atoi_simple(p);
-        }
-        while (*p && *p != '\n') p++;
-        if (*p == '\n') p++;
-    }
-    return -1;
-}
-
-static const char *find_body_start(const char *response)
-{
-    const char *p = response;
-    while (*p) {
-        if (p[0] == '\r' && p[1] == '\n' && p[2] == '\r' && p[3] == '\n')
-            return p + 4;
-        if (p[0] == '\n' && p[1] == '\n')
-            return p + 2;
-        p++;
-    }
-    return NULL;
-}
+/* ── Response Parser ────────────────────────────────────────────────── */
 
 static http_response_t *parse_response(char *buf, size_t total)
 {
-    if (total == 0) return NULL;
-
-    int status = parse_status(buf);
-    int clen = parse_content_length(buf);
-    const char *body_start = find_body_start(buf);
+    if (!buf || total == 0) return NULL;
 
     http_response_t *resp = (http_response_t *)os_calloc(1, sizeof(*resp));
     if (!resp) return NULL;
-    resp->status_code = status;
 
-    if (body_start) {
-        size_t before_body = (size_t)(body_start - buf);
-        size_t available = total - before_body;
-        size_t copy_len;
+    /* Parse status line: "HTTP/1.1 200 OK" */
+    char *status_line = buf;
+    char *sp = strchr(status_line, ' ');
+    if (sp) {
+        resp->status_code = atoi_simple(sp + 1);
+    }
 
-        if (clen > 0) {
-            /* Content-Length based */
-            copy_len = (size_t)clen < available ? (size_t)clen : available;
-        } else {
-            /* Chunked or unknown — take everything after headers */
-            copy_len = available;
-            if (copy_len > 0) {
-                resp->body = (char *)os_alloc(copy_len + 1);
-                if (resp->body) {
-                    os_memcpy(resp->body, body_start, copy_len);
-                    resp->body[copy_len] = '\0';
-                    resp->body_len = dechunk(resp->body);
-                }
+    /* Find header-body boundary: \r\n\r\n */
+    char *body_start = strstr(buf, "\r\n\r\n");
+    if (!body_start) {
+        resp->body = buf;
+        resp->body_len = total;
+        return resp;
+    }
+    body_start += 4;
+
+    /* Try Content-Length */
+    char *cl = strstr(buf, "Content-Length:");
+    if (!cl) cl = strstr(buf, "content-length:");
+    if (cl) {
+        char *val = cl + 15;
+        while (*val == ' ') val++;
+        size_t content_len = (size_t)atoi_simple(val);
+        size_t body_avail = total - (size_t)(body_start - buf);
+        size_t copy_len = content_len < body_avail ? content_len : body_avail;
+        if (copy_len > 0) {
+            resp->body = (char *)os_alloc(copy_len + 1);
+            if (resp->body) {
+                os_memcpy(resp->body, body_start, copy_len);
+                resp->body[copy_len] = '\0';
+                resp->body_len = copy_len;
             }
+        }
+        return resp;
+    }
+
+    /* Chunked or unknown — take everything after headers */
+    size_t body_avail = total - (size_t)(body_start - buf);
+    if (body_avail > 0) {
+        resp->body = (char *)os_alloc(body_avail + 1);
+        if (resp->body) {
+            os_memcpy(resp->body, body_start, body_avail);
+            resp->body[body_avail] = '\0';
+            resp->body_len = body_avail;
         }
     }
     return resp;
 }
 
-/* ── HTTPS via openssl s_client pipe ───────────────────────────────── */
+/* ── HTTPS via curl ─────────────────────────────────────────────────── */
 
 static http_response_t *https_request(const char *method,
                                       const char *host, int port,
@@ -146,95 +110,74 @@ static http_response_t *https_request(const char *method,
     if (!host || port <= 0 || !path) return NULL;
     if (!method) method = "GET";
 
-    /* Build HTTP request */
-    char req[RECV_BUF];
+    /* Build curl command line */
+    char cmd[16384];
+    int pos = 0;
+    pos += os_snprintf(cmd + pos, sizeof(cmd) - pos,
+        "curl -s --max-time %d -X %s 'https://%s:%d%s'",
+        g_http_timeout_sec, method, host, port, path);
+
+    if (content_type)
+        pos += os_snprintf(cmd + pos, sizeof(cmd) - pos,
+            " -H 'Content-Type: %s'", content_type);
+
+    if (extra_headers) {
+        const char *h = extra_headers;
+        while (*h && pos < (int)sizeof(cmd) - 100) {
+            while (*h == ' ' || *h == '\t') h++;
+            if (!*h) break;
+            const char *eol = strstr(h, "\r\n");
+            if (!eol) eol = strchr(h, '\n');
+            if (!eol) eol = h + os_strlen(h);
+            size_t hlen = (size_t)(eol - h);
+            if (hlen > 0 && hlen < 800) {
+                char hbuf[1024];
+                os_memcpy(hbuf, h, hlen);
+                hbuf[hlen] = '\0';
+                pos += os_snprintf(cmd + pos, sizeof(cmd) - pos,
+                    " -H '%s'", hbuf);
+            }
+            if (*eol == '\r') eol++;
+            if (*eol == '\n') eol++;
+            h = eol;
+        }
+    }
+
     int body_len = body ? (int)os_strlen(body) : 0;
-    int hdr_len;
-    const char *ext = extra_headers ? extra_headers : "";
-
-    if (body && content_type) {
-        hdr_len = os_snprintf(req, sizeof(req),
-            "%s %s HTTP/1.1\r\nHost: %s\r\n"
-            "Content-Type: %s\r\nContent-Length: %d\r\n%s"
-            "Connection: close\r\n\r\n",
-            method, path, host, content_type, body_len, ext);
-    } else {
-        hdr_len = os_snprintf(req, sizeof(req),
-            "%s %s HTTP/1.1\r\nHost: %s\r\n%s"
-            "Connection: close\r\n\r\n",
-            method, path, host, ext);
-    }
-    if (hdr_len < 0 || hdr_len >= (int)sizeof(req)) return NULL;
     if (body && body_len > 0) {
-        int r = os_snprintf(req + hdr_len, sizeof(req) - (size_t)hdr_len,
-                            "%s", body);
-        if (r < 0) return NULL;
-        hdr_len += r;
+        /* Write body to temp file to avoid shell escaping issues */
+        char tmp_path[] = "/tmp/http_body_XXXXXX";
+        int tmp_fd = mkstemp(tmp_path);
+        if (tmp_fd < 0) return NULL;
+        write(tmp_fd, body, (size_t)body_len);
+        close(tmp_fd);
+        pos += os_snprintf(cmd + pos, sizeof(cmd) - pos, " -d '@%s'", tmp_path);
     }
 
-    /* Create two pipes: parent reads from p_out, writes to p_in */
-    int p_in[2], p_out[2];
-    if (os_pipe(p_in) != 0 || os_pipe(p_out) != 0) return NULL;
-
-    char port_str[16];
-    os_snprintf(port_str, sizeof(port_str), "%d", port);
-
-    os_pid_t pid = os_proc_fork();
-    if (pid < 0) {
-        os_fd_close(p_in[0]); os_fd_close(p_in[1]);
-        os_fd_close(p_out[0]); os_fd_close(p_out[1]);
-        return NULL;
+    /* Execute curl */
+    LOG_DEBUG("HTTPS: %s", cmd);
+    FILE *fp = popen(cmd, "r");
+    if (body && body_len > 0) {
+        /* Clean up temp file regardless of popen success */
+        if (cmd[0]) unlink(strstr(cmd, "/tmp/http_body_")); /* rough cleanup */
     }
+    if (!fp) return NULL;
 
-    if (pid == 0) {
-        /* Child: exec openssl s_client -quiet -connect host:port */
-        os_dup2(p_in[0], 0);   /* stdin  from parent */
-        os_dup2(p_out[1], 1);  /* stdout to parent */
-        os_fd_close(p_in[0]); os_fd_close(p_in[1]);
-        os_fd_close(p_out[0]); os_fd_close(p_out[1]);
-
-        /* Redirect stderr to /dev/null to suppress cert output */
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) { os_dup2(devnull, 2); os_fd_close(devnull); }
-
-        char *argv[] = { "openssl", "s_client", "-quiet",
-                         "-connect", NULL, NULL };
-        char conn[256];
-        os_snprintf(conn, sizeof(conn), "%s:%s", host, port_str);
-        argv[4] = conn;
-        os_proc_exec("openssl", argv);
-        _exit(1);
-    }
-
-    /* Parent: close unused pipe ends */
-    os_fd_close(p_in[0]);
-    os_fd_close(p_out[1]);
-
-    /* Write request to child's stdin (pipe fd, use write not send) */
-    write(p_in[1], req, (size_t)hdr_len);
-    os_fd_close(p_in[1]);  /* close stdin → openssl knows we're done */
-
-    /* Read response from child's stdout (pipe fd, use read not recv) */
     char *buf = (char *)os_alloc(RECV_BUF);
-    if (!buf) { os_fd_close(p_out[0]); os_proc_wait(pid, NULL); return NULL; }
-
+    if (!buf) { pclose(fp); return NULL; }
     size_t total = 0;
-    for (;;) {
-        ssize_t nr = read(p_out[0], buf + total, RECV_BUF - total - 1);
-        if (nr <= 0) break;
-        total += (size_t)nr;
-        if (total >= RECV_BUF - 1) break;
+    while (total < RECV_BUF - 1) {
+        size_t n = fread(buf + total, 1, RECV_BUF - total - 1, fp);
+        if (n == 0) break;
+        total += n;
     }
     buf[total] = '\0';
-    os_fd_close(p_out[0]);
-    os_proc_wait(pid, NULL);
+    pclose(fp);
 
-    http_response_t *resp = parse_response(buf, total);
-    os_free(buf);
-    return resp;
+    return parse_response(buf, total);
 }
 
-/* ── HTTPS Streaming ──────────────────────────────────────────────── */
+/* ── HTTPS Streaming via curl (line by line) ────────────────────────── */
 
 int https_post_stream(const char *host, int port,
                       const char *path,
@@ -245,81 +188,69 @@ int https_post_stream(const char *host, int port,
 {
     if (!host || port <= 0 || !path || !on_chunk) return -1;
 
-    char req[RECV_BUF];
+    /* Build curl command */
+    char cmd[16384];
+    int pos = 0;
     int body_len = body ? (int)os_strlen(body) : 0;
-    int hdr_len;
-    const char *ext = extra_headers ? extra_headers : "";
 
-    if (body && content_type) {
-        hdr_len = os_snprintf(req, sizeof(req),
-            "POST %s HTTP/1.1\r\nHost: %s\r\n"
-            "Content-Type: %s\r\nContent-Length: %d\r\n%s"
-            "Connection: close\r\n\r\n",
-            path, host, content_type, body_len, ext);
-    } else {
-        hdr_len = os_snprintf(req, sizeof(req),
-            "POST %s HTTP/1.1\r\nHost: %s\r\n%s"
-            "Connection: close\r\n\r\n",
-            path, host, ext);
+    pos += os_snprintf(cmd + pos, sizeof(cmd) - pos,
+        "curl -sN --max-time %d -X POST 'https://%s:%d%s'",
+        g_http_timeout_sec, host, port, path);
+
+    if (content_type)
+        pos += os_snprintf(cmd + pos, sizeof(cmd) - pos,
+            " -H 'Content-Type: %s'", content_type);
+
+    if (extra_headers) {
+        const char *h = extra_headers;
+        while (*h && pos < (int)sizeof(cmd) - 100) {
+            while (*h == ' ' || *h == '\t') h++;
+            if (!*h) break;
+            const char *eol = strstr(h, "\r\n");
+            if (!eol) eol = strchr(h, '\n');
+            if (!eol) eol = h + os_strlen(h);
+            size_t hlen = (size_t)(eol - h);
+            if (hlen > 0 && hlen < 800) {
+                char hbuf[1024];
+                os_memcpy(hbuf, h, hlen);
+                hbuf[hlen] = '\0';
+                pos += os_snprintf(cmd + pos, sizeof(cmd) - pos,
+                    " -H '%s'", hbuf);
+            }
+            if (*eol == '\r') eol++;
+            if (*eol == '\n') eol++;
+            h = eol;
+        }
     }
-    if (hdr_len < 0 || hdr_len >= (int)sizeof(req)) return -1;
+
     if (body && body_len > 0) {
-        int r = os_snprintf(req + hdr_len, sizeof(req) - (size_t)hdr_len,
-                            "%s", body);
-        if (r < 0) return -1;
-        hdr_len += r;
+        char tmp_path[] = "/tmp/http_body_XXXXXX";
+        int tmp_fd = mkstemp(tmp_path);
+        if (tmp_fd < 0) return -1;
+        write(tmp_fd, body, (size_t)body_len);
+        close(tmp_fd);
+        pos += os_snprintf(cmd + pos, sizeof(cmd) - pos, " -d '@%s'", tmp_path);
     }
 
-    int p_in[2], p_out[2];
-    if (os_pipe(p_in) != 0 || os_pipe(p_out) != 0) return -1;
+    /* Execute curl with popen */
+    LOG_DEBUG("HTTPS: STREAM %s", cmd);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return -1;
 
-    char port_str[16];
-    os_snprintf(port_str, sizeof(port_str), "%d", port);
-
-    os_pid_t pid = os_proc_fork();
-    if (pid < 0) {
-        os_fd_close(p_in[0]); os_fd_close(p_in[1]);
-        os_fd_close(p_out[0]); os_fd_close(p_out[1]);
-        return -1;
-    }
-
-    if (pid == 0) {
-        os_dup2(p_in[0], 0);
-        os_dup2(p_out[1], 1);
-        os_fd_close(p_in[0]); os_fd_close(p_in[1]);
-        os_fd_close(p_out[0]); os_fd_close(p_out[1]);
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) { os_dup2(devnull, 2); os_fd_close(devnull); }
-        char conn[256];
-        os_snprintf(conn, sizeof(conn), "%s:%s", host, port_str);
-        char *argv[] = { "openssl", "s_client", "-quiet",
-                         "-connect", conn, NULL };
-        os_proc_exec("openssl", argv);
-        _exit(1);
-    }
-
-    os_fd_close(p_in[0]);
-    os_fd_close(p_out[1]);
-
-    write(p_in[1], req, (size_t)hdr_len);
-    os_fd_close(p_in[1]);
-
-    /* Read chunks and call callback for each */
-    char buf[4096];
+    /* Read output line by line */
+    char line[16384];
     size_t total = 0;
-    for (;;) {
-        ssize_t nr = read(p_out[0], buf, sizeof(buf));
-        if (nr <= 0) break;
-        on_chunk(buf, (size_t)nr, user);
-        total += (size_t)nr;
+    while (fgets(line, sizeof(line), fp)) {
+        size_t llen = os_strlen(line);
+        on_chunk(line, llen, user);
+        total += llen;
     }
 
-    os_fd_close(p_out[0]);
-    os_proc_wait(pid, NULL);
+    pclose(fp);
     return (int)total;
 }
 
-/* ── HTTP via raw TCP socket ───────────────────────────────────────── */
+/* ── HTTP via raw TCP socket (non-TLS) ──────────────────────────────── */
 
 static http_response_t *http_request(const char *method,
                                      const char *host, int port,
@@ -389,7 +320,7 @@ static http_response_t *http_request(const char *method,
     return resp;
 }
 
-/* ── Public API ───────────────────────────────────────────────────── */
+/* ── Public API ─────────────────────────────────────────────────────── */
 
 http_response_t *http_get(const char *host, int port, const char *path)
 {
@@ -422,32 +353,3 @@ void http_response_free(http_response_t *resp)
     if (resp->body) os_free(resp->body);
     os_free(resp);
 }
-
-/* ── Module Registration ──────────────────────────────────────────── */
-
-static int http_client_init(framework_module_t *mod)
-{
-    (void)mod;
-    LOG_INFO("HttpClient: init (HTTP+HTTPS)");
-    return 0;
-}
-
-static int http_client_start(framework_module_t *mod)
-{
-    (void)mod;
-    LOG_INFO("HttpClient: ready");
-    return 0;
-}
-
-    framework_module_t http_client_mod = {
-    .name     = "http_client",
-    .version  = 0x00020000,
-    
-    .state    = FRAMEWORK_STATE_UNLOADED,
-    .init     = http_client_init,
-    .start    = http_client_start,
-    .loop     = NULL, .stop = NULL, .deinit = NULL,
-    .ctx      = NULL, .id = 0, .next = NULL,
-};
-
-MODULE_REGISTER(http_client_mod);

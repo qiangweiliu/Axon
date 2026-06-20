@@ -354,7 +354,11 @@ llm_response_t *llm_chat_stream(const char *endpoint,
 
     sse_feed(&sp, "\n\n", 2);
 
-    if (sp.accum_len == 0) { LOG_WARN("LLM: no content"); os_free(sp.accumulated); return NULL; }
+    if (sp.accum_len == 0) {
+        LOG_WARN("LLM: no content (total=%d), fallback to non-stream", total);
+        os_free(sp.accumulated);
+        return llm_chat(endpoint, api_key, model, prompt);
+    }
 
     llm_response_t *resp = (llm_response_t *)os_calloc(1, sizeof(*resp));
     if (!resp) { os_free(sp.accumulated); return NULL; }

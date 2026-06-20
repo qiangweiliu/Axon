@@ -730,7 +730,39 @@ int handle_ask(const char *question, char *out, size_t out_len)
         archive_feed_turn(question, resp->content);
     }
 
-    /* ── Phase 2: skill content or tool result — do one more LLM call ── */
+    /* ── Tool call (<tool_call> format, not [TOOL:] old format) ─────── */
+    {
+        const char *tc = resp && resp->content ? strstr(resp->content, "<tool_call>") : NULL;
+        if (tc && !show_skill_list && !skill_loaded) {
+            char agent_base[65536];
+            int ab = 0;
+            ab += os_snprintf(agent_base + ab, sizeof(agent_base) - ab, "%s", prompt_buf);
+
+            char agent_answer[AGENT_MAX_RESPONSE];
+            agent_context_t actx = {
+                .base_prompt = agent_base,
+                .max_depth = 4,
+            };
+            int rc = agent_run(endpoint, api_key, model,
+                               &actx, question, agent_answer, sizeof(agent_answer));
+
+            /* Use agent result as final output */
+            if (out) {
+                size_t pos = 0;
+                if (rc == 0)
+                    pos += os_snprintf(out + pos, out_len - pos, "  %.1fs", 0.0);
+                os_snprintf(out + pos, out_len - pos, RST);
+            }
+
+            /* Print agent's final answer */
+            os_printf("%s\n", agent_answer);
+
+            llm_response_free(resp);
+            return 0;
+        }
+    }
+
+    /* ── Phase 2: skill content — do one more LLM call ── */
     if (show_skill_list || skill_loaded) {
         if (debug) os_fprintf_stderr(DIM "──[DEBUG: Phase 2]───────" RST "\n");
 
