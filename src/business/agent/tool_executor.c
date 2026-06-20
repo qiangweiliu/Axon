@@ -207,6 +207,9 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
     LOG_DEBUG("ToolExec: execute_call tool='%s' args='%s'",
               call->name, call->args_json);
 
+    /* Visual tool indicator on stderr (debug UI) */
+    os_fprintf_stderr("\n  \033[2m⚙ %s\033[0m\n", call->name);
+
     /* 1. Validate tool exists */
     tool_info_t info;
     if (tool_find(call->name, &info) != 0) {

@@ -526,9 +526,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
               char _c = _q[_i]; prompt_buf[pos++] = (_c == '\n') ? ' ' : _c; } \
           prompt_buf[pos] = '\0'; } \
         if (debug) { \
-            os_fprintf_stderr(DIM "──[DEBUG: Prompt Layer 1-3] (%zu bytes)──" RST "\n", \
+            os_fprintf_stderr(DIM "──[PROMPT] (%zu bytes)────────────────────" RST "\n", \
                               os_strlen(prompt_buf)); \
-            os_fprintf_stderr(DIM "%s" RST "\n", prompt_buf); \
+            os_fprintf_stderr("%s\n", prompt_buf); \
             os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n"); \
         } \
     } while(0)
@@ -562,9 +562,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
 
     /* Debug: raw model response */
     if (debug && resp->content) {
-        os_fprintf_stderr(DIM "──[DEBUG: Phase 1 Response] (%zu bytes)───" RST "\n",
+        os_fprintf_stderr(DIM "──[LLM RESPONSE] (%zu bytes)───────────────" RST "\n",
                           os_strlen(resp->content));
-        os_fprintf_stderr(DIM "%s" RST "\n", resp->content);
+        os_fprintf_stderr("%s\n", resp->content);
         os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n");
     }
 
@@ -867,9 +867,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
         if (g_ctx->saw_reasoning == 1) { print_reasoning_bottom(); os_printf("\n"); }
 
         if (debug && resp2->content) {
-            os_fprintf_stderr(DIM "──[DEBUG: Phase 2 Response] (%zu bytes)───" RST "\n",
+            os_fprintf_stderr(DIM "──[LLM RESPONSE Phase2] (%zu bytes)────────" RST "\n",
                               os_strlen(resp2->content));
-            os_fprintf_stderr(DIM "%s" RST "\n", resp2->content);
+            os_fprintf_stderr("%s\n", resp2->content);
             os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n");
         }
 

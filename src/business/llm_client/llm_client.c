@@ -145,7 +145,6 @@ static void sse_feed(sse_parser_t *sp, const char *data, size_t len)
         }
         if (is_event) {
             char *line = sp->buf;
-            LOG_DEBUG("SSE: event detected, buf=%.150s", sp->buf);
             while (line && *line && line < sp->buf + sp->pos) {
                 if (os_strncmp(line, "data: ", 6) == 0) {
                     char *json = line + 6;
@@ -163,7 +162,6 @@ static void sse_feed(sse_parser_t *sp, const char *data, size_t len)
                         int extracted_is_reasoning = 0;
                         char *content = m->extract_content(json, NULL, &extracted_is_reasoning);
                         if (content && content[0]) {
-                            LOG_DEBUG("SSE: content='%s'", content);
                             sp->tokens++;
                             uint64_t elapsed = os_clock_ms() - sp->t0;
                             if (sp->cb)
@@ -185,8 +183,6 @@ static void sse_feed(sse_parser_t *sp, const char *data, size_t len)
                             if (ct > sp->completion_tokens) sp->completion_tokens = ct;
                             int pt = m->extract_int(json, "prompt_tokens");
                             if (pt > sp->prompt_tokens) sp->prompt_tokens = pt;
-                        } else {
-                            
                         }
                         if (content) os_free(content);
                     }

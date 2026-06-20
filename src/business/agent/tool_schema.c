@@ -121,8 +121,6 @@ int tool_schema_build(char *buf, size_t len)
     if (!buf || len < 10) return 0;
     int pos = 0;
 
-    LOG_DEBUG("ToolSchema: build start, buf_len=%zu", len);
-
     pos += os_snprintf(buf + pos, len - pos,
         "You can use tools when needed.\n\n"
         "Format for tool calls:\n"
@@ -137,14 +135,10 @@ int tool_schema_build(char *buf, size_t len)
         "Available tools:\n");
 
     int n = tool_count();
-    LOG_DEBUG("ToolSchema: %d registered tool%s to describe", n, n == 1 ? "" : "s");
     for (int i = 0; i < n && pos < (int)len - 200; i++) {
         tool_info_t info;
         if (tool_get_info(i, &info) != 0) continue;
         if (!info.enabled) continue;
-        LOG_DEBUG("ToolSchema: describing tool[%d]='%s' (pos=%d/%zu)",
-                  i, info.name, pos, len);
-
         pos += os_snprintf(buf + pos, len - pos,
             "  %s\n    %s\n", info.name, info.description);
 

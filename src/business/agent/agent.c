@@ -17,12 +17,17 @@
 #define DIM "\033[2m"
 #define RST "\033[0m"
 
-static void debug_dump(const char *label, const char *data, size_t len)
+static void debug_dump(const char *label, int round, const char *data, size_t len, int is_prompt)
 {
-    os_fprintf_stderr(DIM "──[DEBUG: %s] (%zu bytes)────────────" RST "\n",
-                      label, len);
-    os_fprintf_stderr(DIM "%s" RST "\n", data ? data : "(null)");
+    if (is_prompt)
+        os_fprintf_stderr(DIM "──[AGENT R%d PROMPT] (%zu bytes)───────────" RST "\n",
+                          round, len);
+    else
+        os_fprintf_stderr(DIM "──[AGENT R%d RESPONSE] (%zu bytes)─────────" RST "\n",
+                          round, len);
+    os_fprintf_stderr("%s\n", data ? data : "(null)");
     os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n");
+    (void)label;
 }
 
 int agent_run(const char *endpoint,
@@ -57,7 +62,7 @@ int agent_run(const char *endpoint,
 
     while (depth < max_depth) {
         if (ctx->debug)
-            debug_dump("Agent Round Prompt", buf, os_strlen(buf));
+            debug_dump("prompt", depth + 1, buf, os_strlen(buf), 1);
 
         llm_response_t *resp = llm_chat(endpoint, api_key, model, buf);
         if (!resp) {
@@ -71,7 +76,7 @@ int agent_run(const char *endpoint,
         }
 
         if (ctx->debug)
-            debug_dump("Agent Round Response", resp->content, resp->content_len);
+            debug_dump("response", depth + 1, resp->content, resp->content_len, 0);
 
         tool_call_t call;
         tool_parse_status_t status = tool_parse_call(resp->content, &call);
