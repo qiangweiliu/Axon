@@ -12,6 +12,19 @@
 #include "os_api.h"
 #include <string.h>
 
+/* ── Debug dump helpers ───────────────────────────────────────────── */
+
+#define DIM "\033[2m"
+#define RST "\033[0m"
+
+static void debug_dump(const char *label, const char *data, size_t len)
+{
+    os_fprintf_stderr(DIM "──[DEBUG: %s] (%zu bytes)────────────" RST "\n",
+                      label, len);
+    os_fprintf_stderr(DIM "%s" RST "\n", data ? data : "(null)");
+    os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n");
+}
+
 int agent_run(const char *endpoint,
               const char *api_key,
               const char *model,
@@ -41,7 +54,14 @@ int agent_run(const char *endpoint,
     /* Append user question (only added once — it's always the same) */
     pos += os_snprintf(buf + pos, sizeof(buf) - pos, "User: %s\n", question);
 
+    /* Buffer for preserving LLM's last tool-call response across iterations */
+    char prev_llm_output[4096];
+    prev_llm_output[0] = '\0';
+
     while (depth < max_depth) {
+        if (ctx->debug)
+            debug_dump("Agent Round Prompt", buf, os_strlen(buf));
+
         llm_response_t *resp = llm_chat(endpoint, api_key, model, buf);
         if (!resp) {
             os_snprintf(answer, answer_len, "Error: LLM unavailable");
@@ -52,6 +72,9 @@ int agent_run(const char *endpoint,
             os_snprintf(answer, answer_len, "Error: empty LLM response");
             return -1;
         }
+
+        if (ctx->debug)
+            debug_dump("Agent Round Response", resp->content, resp->content_len);
 
         tool_call_t call;
         tool_parse_status_t status = tool_parse_call(resp->content, &call);
@@ -72,9 +95,21 @@ int agent_run(const char *endpoint,
             tool_execute_call(&call, tool_result, sizeof(tool_result));
         }
 
-        /* Truncate back to base+question, append tool result */
+        /* Save LLM's output for the next iteration's context */
+        size_t prev_len = os_strlen(resp->content);
+        if (prev_len >= sizeof(prev_llm_output))
+            prev_len = sizeof(prev_llm_output) - 1;
+        os_memcpy(prev_llm_output, resp->content, prev_len);
+        prev_llm_output[prev_len] = '\0';
+
+        /* Truncate back to base+question, then append history for context */
         pos = base_end;
         pos += os_snprintf(buf + pos, sizeof(buf) - pos, "User: %s\n", question);
+        /* Include the LLM's own previous tool call so it sees the chain */
+        if (prev_llm_output[0]) {
+            pos += os_snprintf(buf + pos, sizeof(buf) - pos,
+                "Previous assistant output:\n%s\n", prev_llm_output);
+        }
         pos += os_snprintf(buf + pos, sizeof(buf) - pos,
             "Tool result:\n%s\n", tool_result);
 
@@ -83,6 +118,7 @@ int agent_run(const char *endpoint,
     }
 
     os_snprintf(answer, answer_len,
-        "Max depth (%d) reached. The task may be incomplete.", max_depth);
+        "[Completed after %d tool call(s)]\n%s",
+        depth, prev_llm_output);
     return 1;
 }

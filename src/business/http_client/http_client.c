@@ -114,7 +114,7 @@ static http_response_t *https_request(const char *method,
     char cmd[16384];
     int pos = 0;
     pos += os_snprintf(cmd + pos, sizeof(cmd) - pos,
-        "curl -s --max-time %d -X %s 'https://%s:%d%s'",
+        "curl -si --max-time %d -X %s 'https://%s:%d%s'",
         g_http_timeout_sec, method, host, port, path);
 
     if (content_type)
@@ -157,10 +157,6 @@ static http_response_t *https_request(const char *method,
     /* Execute curl */
     LOG_DEBUG("HTTPS: %s", cmd);
     FILE *fp = popen(cmd, "r");
-    if (body && body_len > 0) {
-        /* Clean up temp file regardless of popen success */
-        if (cmd[0]) unlink(strstr(cmd, "/tmp/http_body_")); /* rough cleanup */
-    }
     if (!fp) return NULL;
 
     char *buf = (char *)os_alloc(RECV_BUF);
@@ -173,6 +169,20 @@ static http_response_t *https_request(const char *method,
     }
     buf[total] = '\0';
     pclose(fp);
+
+    /* Clean up temp file AFTER curl has finished (not before — race on WSL) */
+    if (body && body_len > 0) {
+        const char *tp = strstr(cmd, "/tmp/http_body_");
+        if (tp) unlink(tp);
+    }
+
+    /* Debug: dump raw response on HTTP error */
+    const char *dbg = buf;
+    while (*dbg == ' ' || *dbg == '\t' || *dbg == '\n' || *dbg == '\r') dbg++;
+    if (total > 0 && (os_strncmp(dbg, "HTTP/", 5) != 0)) {
+        LOG_DEBUG("HTTPS: raw output (first 200): %.*s",
+                  (int)(total < 200 ? total : 200), buf);
+    }
 
     return parse_response(buf, total);
 }
@@ -247,6 +257,13 @@ int https_post_stream(const char *host, int port,
     }
 
     pclose(fp);
+
+    /* Clean up temp file after curl finishes */
+    if (body && body_len > 0) {
+        const char *tp = strstr(cmd, "/tmp/http_body_");
+        if (tp) unlink(tp);
+    }
+
     return (int)total;
 }
 

@@ -18,11 +18,30 @@ static int agnes_build_body(char *buf, size_t buf_len,
                              int stream)
 {
     char safe_prompt[BUF_SIZE];
-    size_t plen = os_strlen(prompt);
-    if (plen >= sizeof(safe_prompt)) plen = sizeof(safe_prompt) - 1;
-    for (size_t i = 0; i < plen; i++)
-        safe_prompt[i] = (prompt[i] == '"') ? '\'' : prompt[i];
-    safe_prompt[plen] = '\0';
+    size_t pi = 0;
+    const char *p = prompt;
+    while (*p && pi < sizeof(safe_prompt) - 6) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"') {
+            safe_prompt[pi++] = '\'';
+        } else if (c == '\\') {
+            safe_prompt[pi++] = '\\';
+            safe_prompt[pi++] = '\\';
+        } else if (c == '\n') {
+            safe_prompt[pi++] = '\\';
+            safe_prompt[pi++] = 'n';
+        } else if (c == '\r') {
+            safe_prompt[pi++] = '\\';
+            safe_prompt[pi++] = 'r';
+        } else if (c == '\t') {
+            safe_prompt[pi++] = '\\';
+            safe_prompt[pi++] = 't';
+        } else {
+            safe_prompt[pi++] = c;
+        }
+        p++;
+    }
+    safe_prompt[pi] = '\0';
 
     return os_snprintf(buf, buf_len,
         "{"
@@ -49,16 +68,41 @@ static char* agnes_extract_content(const char *json, size_t *out_len,
     }
     if (!start) return NULL;
 
+    /* Find end of JSON string value, handling \" escapes */
     const char *end = start;
-    while (*end && *end != '"') end++;
+    while (*end) {
+        if (*end == '\\' && *(end + 1) == '"') {
+            end += 2;  /* skip escaped quote */
+        } else if (*end == '"') {
+            break;  /* unescaped " — end of string */
+        } else if (*end == '\\' && *(end + 1) == '\\') {
+            end += 2;  /* skip escaped backslash */
+        } else {
+            end++;
+        }
+    }
+
     size_t len = (size_t)(end - start);
     if (len == 0) return NULL;
 
+    /* Allocate and unescape JSON string */
     char *content = (char *)os_alloc(len + 1);
     if (!content) return NULL;
-    os_memcpy(content, start, len);
-    content[len] = '\0';
-    if (out_len) *out_len = len;
+    size_t o = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (start[i] == '\\' && i + 1 < len) {
+            if (start[i + 1] == '"')  { content[o++] = '"'; i++; }
+            else if (start[i + 1] == '\\') { content[o++] = '\\'; i++; }
+            else if (start[i + 1] == 'n')  { content[o++] = '\n'; i++; }
+            else if (start[i + 1] == 't')  { content[o++] = '\t'; i++; }
+            else if (start[i + 1] == 'r')  { content[o++] = '\r'; i++; }
+            else { content[o++] = start[i]; }
+        } else {
+            content[o++] = start[i];
+        }
+    }
+    content[o] = '\0';
+    if (out_len) *out_len = o;
     return content;
 }
 

@@ -79,6 +79,8 @@ int tool_register(const tool_def_t *tool)
     g_ctx->tool_count++;
 
     LOG_INFO("ToolManager: registered '%s'", tool->name);
+    LOG_DEBUG("ToolManager:   risk=%d, schema_len=%zu",
+              tool->risk, tool->params_json ? os_strlen(tool->params_json) : 0);
     os_mutex_unlock(g_ctx->tool_mutex);
     return 0;
 }
@@ -96,9 +98,14 @@ int tool_call(const char *name, const char *args_json,
             os_strcmp(g_ctx->tools[i].def.name, name) == 0) {
             tool_def_t *t = &g_ctx->tools[i].def;
             LOG_INFO("ToolManager: calling '%s'", name);
+            LOG_DEBUG("ToolManager:   args (first 200): %.*s",
+                      (int)(os_strlen(args_json) < 200 ? os_strlen(args_json) : 200),
+                      args_json);
             os_mutex_unlock(g_ctx->tool_mutex);
 
             int rc = t->execute(args_json, result, result_len, NULL);
+            LOG_DEBUG("ToolManager:   result: rc=%d, output_len=%zu",
+                      rc, result ? os_strlen(result) : (size_t)0);
             return rc;
         }
     }
@@ -148,6 +155,8 @@ int tool_list_json(char *buf, size_t buf_len)
     json_append(buf, buf_len, &pos, "]");
 
     os_mutex_unlock(g_ctx->tool_mutex);
+    LOG_DEBUG("ToolManager: list_json: %d tool%s serialized, buf=%zu/%zu",
+              count, count == 1 ? "" : "s", pos, buf_len);
     return count;
 }
 
@@ -156,6 +165,7 @@ int tool_count(void)
     os_mutex_lock(g_ctx->tool_mutex);
     int n = g_ctx->tool_count;
     os_mutex_unlock(g_ctx->tool_mutex);
+    LOG_DEBUG("ToolManager: count=%d", n);
     return n;
 }
 
@@ -165,6 +175,7 @@ int tool_get_info(int index, tool_info_t *info)
     os_mutex_lock(g_ctx->tool_mutex);
     if (index < 0 || index >= g_ctx->tool_count) {
         os_mutex_unlock(g_ctx->tool_mutex);
+        LOG_DEBUG("ToolManager: get_info(%d) out of range (count=%d)", index, g_ctx->tool_count);
         return -1;
     }
     tool_entry_t *e = &g_ctx->tools[index];
@@ -174,6 +185,7 @@ int tool_get_info(int index, tool_info_t *info)
     info->risk = e->def.risk;
     info->enabled = e->active;
     os_mutex_unlock(g_ctx->tool_mutex);
+    LOG_DEBUG("ToolManager: get_info(%d) -> '%s'", index, info->name);
     return 0;
 }
 
@@ -190,10 +202,12 @@ int tool_find(const char *name, tool_info_t *info)
             info->risk = e->def.risk;
             info->enabled = e->active;
             os_mutex_unlock(g_ctx->tool_mutex);
+            LOG_DEBUG("ToolManager: find('%s') found (risk=%d)", name, info->risk);
             return 0;
         }
     }
     os_mutex_unlock(g_ctx->tool_mutex);
+    LOG_DEBUG("ToolManager: find('%s') not found", name);
     return -1;
 }
 
@@ -206,15 +220,21 @@ int tool_validate(const char *name, const char *args_json,
     tool_info_t info;
     if (tool_find(name, &info) != 0) {
         os_snprintf(err, err_len, "unknown tool: %s", name);
+        LOG_DEBUG("ToolManager: validate('%s') failed: unknown tool", name);
         return -1;
     }
-    if (!info.params_json || !*info.params_json)
+    if (!info.params_json || !*info.params_json) {
+        LOG_DEBUG("ToolManager: validate('%s') — no schema, skipping", name);
         return 0;  /* no schema = no validation */
+    }
 
     /* Lightweight: check required fields exist in args_json */
     /* Parse schema for "required": [...] and check each key exists in args */
     const char *req = strstr(info.params_json, "\"required\"");
-    if (!req) return 0;  /* no required fields */
+    if (!req) {
+        LOG_DEBUG("ToolManager: validate('%s') — no required fields in schema", name);
+        return 0;  /* no required fields */
+    }
 
     const char *arr_start = strchr(req, '[');
     if (!arr_start) return 0;
@@ -246,12 +266,15 @@ int tool_validate(const char *name, const char *args_json,
             if (!strstr(args_json, search_sq)) {
                 os_snprintf(err, err_len, "missing required argument: %.*s",
                             (int)fn_len, fn_start);
+                LOG_DEBUG("ToolManager: validate('%s') failed: missing '%.*s'",
+                          name, (int)fn_len, fn_start);
                 return -1;
             }
         }
         /* Skip past quote */
         if (*p == '"') p++;
     }
+    LOG_DEBUG("ToolManager: validate('%s') passed", name);
     return 0;
 }
 
@@ -261,8 +284,10 @@ static int echo_execute(const char *args_json, char *result,
                         size_t result_len, void *user_data)
 {
     (void)user_data;
-    return os_snprintf(result, result_len,
-                       "{\"echo\":%s}", args_json ? args_json : "{}");
+    int n = os_snprintf(result, result_len,
+                        "{\"echo\":%s}", args_json ? args_json : "{}");
+    LOG_DEBUG("ToolManager: echo -> %d bytes", n);
+    return n;
 }
 
 static int list_dir_execute(const char *args_json, char *result,
@@ -303,18 +328,21 @@ static int list_dir_execute(const char *args_json, char *result,
 
     os_dir_handle_t dh = os_dir_open(dir_path);
     if (!dh) {
+        LOG_DEBUG("ToolManager: list_dir cannot open '%s'", dir_path);
         return os_snprintf(result, result_len, "{\"error\":\"cannot open directory\"}");
     }
 
     pos += os_snprintf(result + pos, result_len - pos, "{\"entries\":[");
-    int first = 1;
+    int first = 1, entry_count = 0;
     const char *entry;
     while ((entry = os_dir_next(dh)) != NULL && pos < result_len - 50) {
         if (!first) { pos += os_snprintf(result + pos, result_len - pos, ","); }
         first = 0;
         pos += os_snprintf(result + pos, result_len - pos, "\"%s\"", entry);
+        entry_count++;
     }
     os_dir_close(dh);
+    LOG_DEBUG("ToolManager: list_dir '%s' -> %d entries", dir_path, entry_count);
 
     pos += os_snprintf(result + pos, result_len - pos, "]}");
     return 0;
@@ -354,6 +382,7 @@ static int read_file_execute(const char *args_json, char *result,
 
     os_file_handle_t fh = os_file_open(path, "r");
     if (!fh) {
+        LOG_DEBUG("ToolManager: read_file cannot open '%s'", path);
         return os_snprintf(result, result_len, "{\"error\":\"cannot open file: %s\"}", path);
     }
 
@@ -363,6 +392,159 @@ static int read_file_execute(const char *args_json, char *result,
     size_t rp = 1 + n;
     result[rp] = '}';
     result[rp + 1] = '\0';
+    LOG_DEBUG("ToolManager: read_file '%s' -> %zu bytes", path, n);
+    return 0;
+}
+
+/* ── write_file ──────────────────────────────────────────────────── */
+
+static int write_file_execute(const char *args_json, char *result,
+                               size_t result_len, void *user_data)
+{
+    (void)user_data;
+    if (result_len < 4) return -1;
+    result[0] = '\0';
+
+    /* Parse path and content from JSON */
+    const char *path_start = strstr(args_json ? args_json : "", "\"path\":\"");
+    if (!path_start) {
+        return os_snprintf(result, result_len, "{\"error\":\"missing path argument\"}");
+    }
+    path_start += 8;
+    char path[512];
+    size_t pi = 0;
+    while (path_start[pi] && path_start[pi] != '"' && pi < sizeof(path) - 1) {
+        path[pi] = path_start[pi];
+        pi++;
+    }
+    path[pi] = '\0';
+
+    const char *content_start = strstr(args_json, "\"content\":\"");
+    if (!content_start) {
+        return os_snprintf(result, result_len, "{\"error\":\"missing content argument\"}");
+    }
+    content_start += 11;
+
+    /* Extract content (handle escaped chars: \n, \t, \\, \") */
+    char content_buf[16384];
+    size_t ci = 0;
+    while (content_start[ci] && ci < sizeof(content_buf) - 2) {
+        if (content_start[ci] == '\\' && content_start[ci+1] == '"') {
+            content_buf[ci] = '"';
+            ci++; content_start++;
+            continue;
+        }
+        if (content_start[ci] == '\\' && content_start[ci+1] == 'n') {
+            content_buf[ci] = '\n';
+            ci++; content_start++;
+            continue;
+        }
+        if (content_start[ci] == '\\' && content_start[ci+1] == 't') {
+            content_buf[ci] = '\t';
+            ci++; content_start++;
+            continue;
+        }
+        if (content_start[ci] == '\\' && content_start[ci+1] == '\\') {
+            content_buf[ci] = '\\';
+            ci++; content_start++;
+            continue;
+        }
+        if (content_start[ci] == '"') break;
+        content_buf[ci] = content_start[ci];
+        ci++;
+    }
+    content_buf[ci] = '\0';
+
+    os_file_handle_t fh = os_file_open(path, "w");
+    if (!fh) {
+        LOG_DEBUG("ToolManager: write_file cannot open '%s'", path);
+        return os_snprintf(result, result_len, "{\"error\":\"cannot open file: %s\"}", path);
+    }
+
+    size_t written = os_file_write(fh, content_buf, os_strlen(content_buf));
+    os_file_close(fh);
+
+    LOG_DEBUG("ToolManager: write_file '%s' -> %zu bytes", path, written);
+    return os_snprintf(result, result_len,
+                       "{\"status\":\"ok\",\"path\":\"%s\",\"bytes\":%zu}",
+                       path, written);
+}
+
+/* ── bash ─────────────────────────────────────────────────────────── */
+
+static int bash_execute(const char *args_json, char *result,
+                         size_t result_len, void *user_data)
+{
+    (void)user_data;
+    if (result_len < 4) return -1;
+    result[0] = '\0';
+
+    const char *cmd_start = strstr(args_json ? args_json : "", "\"command\":\"");
+    if (!cmd_start) {
+        return os_snprintf(result, result_len, "{\"error\":\"missing command argument\"}");
+    }
+    cmd_start += 11;  /* skip past "command":" (11 chars) */
+
+    char cmd_buf[4096];
+    size_t ci = 0;
+    while (cmd_start[ci] && ci < sizeof(cmd_buf) - 2) {
+        if (cmd_start[ci] == '\\' && cmd_start[ci+1] == '"') {
+            cmd_buf[ci] = '"';
+            ci++; cmd_start++;
+            continue;
+        }
+        if (cmd_start[ci] == '\\' && cmd_start[ci+1] == 'n') {
+            cmd_buf[ci] = ' ';
+            ci++; cmd_start++;
+            continue;
+        }
+        if (cmd_start[ci] == '\\' && cmd_start[ci+1] == '\\') {
+            cmd_buf[ci] = '\\';
+            ci++; cmd_start++;
+            continue;
+        }
+        if (cmd_start[ci] == '"') break;
+        cmd_buf[ci] = cmd_start[ci];
+        ci++;
+    }
+    cmd_buf[ci] = '\0';
+
+    LOG_DEBUG("ToolManager: bash cmd (first 300): %.*s",
+              (int)(os_strlen(cmd_buf) < 300 ? os_strlen(cmd_buf) : 300), cmd_buf);
+
+    /* Execute via popen */
+    FILE *fp = popen(cmd_buf, "r");
+    if (!fp) {
+        LOG_DEBUG("ToolManager: bash popen failed for '%s'", cmd_buf);
+        return os_snprintf(result, result_len,
+                           "{\"error\":\"popen failed\",\"command\":\"%s\"}", cmd_buf);
+    }
+
+    size_t pos = 0;
+    pos += os_snprintf(result + pos, result_len - pos, "{\"output\":\"");
+    char line[1024];
+    while (fgets(line, sizeof(line), fp) && pos < result_len - 200) {
+        /* Escape special chars for JSON */
+        for (char *lp = line; *lp && pos < result_len - 200; lp++) {
+            if (*lp == '"') {
+                if (pos < result_len - 4) { result[pos++] = '\\'; result[pos++] = '"'; }
+            } else if (*lp == '\\') {
+                if (pos < result_len - 4) { result[pos++] = '\\'; result[pos++] = '\\'; }
+            } else if (*lp == '\n') {
+                if (pos < result_len - 4) { result[pos++] = '\\'; result[pos++] = 'n'; }
+            } else if (*lp == '\t') {
+                if (pos < result_len - 4) { result[pos++] = '\\'; result[pos++] = 't'; }
+            } else {
+                if (pos < result_len - 3) result[pos++] = *lp;
+            }
+        }
+    }
+    int exit_code = pclose(fp);
+    LOG_DEBUG("ToolManager: bash exit_code=%d, output_len=%zu", exit_code, pos);
+    if (pos < result_len - 50) {
+        os_snprintf(result + pos, result_len - pos,
+                    "\",\"exit_code\":%d}", exit_code);
+    }
     return 0;
 }
 
@@ -423,6 +605,31 @@ static int tool_manager_start(framework_module_t *mod)
         .execute = read_file_execute,
     };
     tool_register(&read_file);
+
+    /* Write file tool */
+    tool_def_t write_file = {
+        .name = "write_file",
+        .description = "Write content to a file. Creates the file if it doesn't exist, overwrites if it does.",
+        .params_json = "{\"type\":\"object\",\"properties\":{"
+            "\"path\":{\"type\":\"string\",\"description\":\"file path to write\"},"
+            "\"content\":{\"type\":\"string\",\"description\":\"content to write\"}"
+            "},\"required\":[\"path\",\"content\"]}",
+        .risk = TOOL_RISK_WRITE,
+        .execute = write_file_execute,
+    };
+    tool_register(&write_file);
+
+    /* Bash shell tool */
+    tool_def_t bash = {
+        .name = "bash",
+        .description = "Execute a shell command and return its stdout/stderr output",
+        .params_json = "{\"type\":\"object\",\"properties\":{"
+            "\"command\":{\"type\":\"string\",\"description\":\"shell command to run\"}"
+            "},\"required\":[\"command\"]}",
+        .risk = TOOL_RISK_SHELL,
+        .execute = bash_execute,
+    };
+    tool_register(&bash);
 
     LOG_INFO("ToolManager: ready (%d tool%s)",
              g_ctx->tool_count, g_ctx->tool_count == 1 ? "" : "s");

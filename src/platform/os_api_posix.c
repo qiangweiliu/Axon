@@ -500,6 +500,22 @@ int os_env_set(const char *name, const char *value) {
 }
 
 /* =========================================================================
+ * 用户交互确认
+ * ========================================================================= */
+
+int os_confirm(const char *prompt) {
+    char buf[16];
+    os_printf("%s (y/N): ", prompt);
+    fflush(stdout);
+    if (!fgets(buf, sizeof(buf), stdin)) return 0;
+    /* Trim newline */
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r')) buf[--len] = '\0';
+    if (len == 0) return 0;
+    return (buf[0] == 'y' || buf[0] == 'Y') ? 1 : 0;
+}
+
+/* =========================================================================
  * 系统配置查询
  * ========================================================================= */
 

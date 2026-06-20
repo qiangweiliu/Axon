@@ -1,5 +1,6 @@
 # Kconfig — SkillManager 模块配置
 
-MODULE_SRCS = skill_manager.c
+MODULE_SRCS = skill_manager.c skill_tools.c
 
 CFLAGS += -Isrc/business/skill_manager
+CFLAGS += -Isrc/business/tool_manager

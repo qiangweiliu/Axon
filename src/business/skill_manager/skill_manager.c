@@ -18,6 +18,7 @@
 
 #define SKILL_INDEX_BUF 8192
 #define SKILL_CONTENT_BUF 16384
+#define SKILL_CACHE_MAX 32768
 #define LINE_MAX 512
 
 typedef struct {
@@ -56,9 +57,29 @@ static char *trim(char *s)
     return s;
 }
 
+/* Strip surrounding quotes from a value in-place.
+ * Handles "double", 'single', and mixed. Returns pointer to stripped value. */
+static char *strip_quotes(char *s)
+{
+    if (!s || !*s) return s;
+    size_t len = os_strlen(s);
+    if (len < 2) return s;
+    char q = s[0];
+    if ((q == '"' || q == '\'') && s[len - 1] == q) {
+        s[len - 1] = '\0';
+        return s + 1;
+    }
+    return s;
+}
+
 /* Parse YAML frontmatter delimited by `---` from raw file content.
  * Returns pointer past closing `---`, or content if no frontmatter.
- * Fills name/desc/category from frontmatter keys. */
+ * Fills name/desc/category from frontmatter keys.
+ *
+ * Supports:
+ *   - Single/double quoted values (strips quotes)
+ *   - Multi-line values (continuation lines with leading whitespace)
+ *   - `---` detection at line start only (avoids matching body text) */
 static const char *parse_frontmatter(const char *content,
                                      char *name, size_t name_len,
                                      char *desc, size_t desc_len,
@@ -70,15 +91,27 @@ static const char *parse_frontmatter(const char *content,
     const char *p = content + 3;
     if (*p == '\n') p++;
 
-    /* Find closing --- */
-    const char *end = strstr(p, "\n---");
+    /* Find closing --- — must be at start of a line */
+    const char *end = NULL;
+    const char *scan = p;
+    while ((scan = strchr(scan, '\n')) != NULL) {
+        scan++; /* past \n */
+        if (os_strncmp(scan, "---", 3) == 0) {
+            end = scan;
+            break;
+        }
+    }
     if (!end) {
-        /* Try ending at file boundary */
-        end = strstr(p, "---");
-        if (!end || end == p) return content;
+        /* Try file-end boundary (no closing --- means everything is body) */
+        return content;
     }
 
     /* Parse key:value lines between the --- markers */
+    char current_key = 0; /* 1=name, 2=desc, 3=cat */
+    char multi_buf[256];
+    int multi_pos = 0;
+    int in_multi = 0;
+
     const char *line = p;
     while (line < end) {
         /* Find end of this line */
@@ -92,27 +125,86 @@ static const char *parse_frontmatter(const char *content,
         os_memcpy(buf, line, llen);
         buf[llen] = '\0';
         char *t = trim(buf);
+
+        /* Check for multi-line continuation: non-empty line starting with space/tab */
+        if (in_multi && *t && (*buf == ' ' || *buf == '\t')) {
+            /* Append to multi-line value */
+            size_t tlen = os_strlen(t);
+            if (multi_pos + 1 + tlen < (int)sizeof(multi_buf)) {
+                if (multi_pos > 0) multi_buf[multi_pos++] = ' ';
+                os_memcpy(multi_buf + multi_pos, t, tlen);
+                multi_pos += (int)tlen;
+            }
+            line = nl + 1;
+            continue;
+        }
+        /* Flush multi-line value if we just left multi-line mode */
+        if (in_multi) {
+            multi_buf[multi_pos] = '\0';
+            char *val = strip_quotes(trim(multi_buf));
+            if (current_key == 1) {
+                size_t vlen = os_strlen(val);
+                if (vlen >= name_len) vlen = name_len - 1;
+                os_memcpy(name, val, vlen);
+                name[vlen] = '\0';
+            } else if (current_key == 2) {
+                size_t vlen = os_strlen(val);
+                if (vlen >= desc_len) vlen = desc_len - 1;
+                os_memcpy(desc, val, vlen);
+                desc[vlen] = '\0';
+            } else if (current_key == 3) {
+                size_t vlen = os_strlen(val);
+                if (vlen >= cat_len) vlen = cat_len - 1;
+                os_memcpy(cat, val, vlen);
+                cat[vlen] = '\0';
+            }
+            in_multi = 0;
+            multi_pos = 0;
+            current_key = 0;
+        }
+
         if (*t && *t != '#') {
             char *colon = strchr(t, ':');
             if (colon) {
                 *colon = '\0';
                 char *key = trim(t);
                 char *val = trim(colon + 1);
-                if (os_strcmp(key, "name") == 0) {
-                    size_t vlen = os_strlen(val);
-                    if (vlen >= name_len) vlen = name_len - 1;
-                    os_memcpy(name, val, vlen);
-                    name[vlen] = '\0';
-                } else if (os_strcmp(key, "description") == 0) {
-                    size_t vlen = os_strlen(val);
-                    if (vlen >= desc_len) vlen = desc_len - 1;
-                    os_memcpy(desc, val, vlen);
-                    desc[vlen] = '\0';
-                } else if (os_strcmp(key, "category") == 0) {
-                    size_t vlen = os_strlen(val);
-                    if (vlen >= cat_len) vlen = cat_len - 1;
-                    os_memcpy(cat, val, vlen);
-                    cat[vlen] = '\0';
+
+                /* Check if the value is empty — this might be a multi-line start */
+                if (!*val) {
+                    /* Multi-line value starts on next line */
+                    if (os_strcmp(key, "name") == 0) {
+                        current_key = 1;
+                        in_multi = 1;
+                        multi_pos = 0;
+                    } else if (os_strcmp(key, "description") == 0) {
+                        current_key = 2;
+                        in_multi = 1;
+                        multi_pos = 0;
+                    } else if (os_strcmp(key, "category") == 0) {
+                        current_key = 3;
+                        in_multi = 1;
+                        multi_pos = 0;
+                    }
+                } else {
+                    /* Normal single-line value */
+                    char *stripped = strip_quotes(val);
+                    if (os_strcmp(key, "name") == 0) {
+                        size_t vlen = os_strlen(stripped);
+                        if (vlen >= name_len) vlen = name_len - 1;
+                        os_memcpy(name, stripped, vlen);
+                        name[vlen] = '\0';
+                    } else if (os_strcmp(key, "description") == 0) {
+                        size_t vlen = os_strlen(stripped);
+                        if (vlen >= desc_len) vlen = desc_len - 1;
+                        os_memcpy(desc, stripped, vlen);
+                        desc[vlen] = '\0';
+                    } else if (os_strcmp(key, "category") == 0) {
+                        size_t vlen = os_strlen(stripped);
+                        if (vlen >= cat_len) vlen = cat_len - 1;
+                        os_memcpy(cat, stripped, vlen);
+                        cat[vlen] = '\0';
+                    }
                 }
             }
         }
@@ -120,8 +212,30 @@ static const char *parse_frontmatter(const char *content,
         line = nl + 1;
     }
 
+    /* Flush trailing multi-line if file ended mid-value */
+    if (in_multi) {
+        multi_buf[multi_pos] = '\0';
+        char *val = strip_quotes(trim(multi_buf));
+        if (current_key == 1) {
+            size_t vlen = os_strlen(val);
+            if (vlen >= name_len) vlen = name_len - 1;
+            os_memcpy(name, val, vlen);
+            name[vlen] = '\0';
+        } else if (current_key == 2) {
+            size_t vlen = os_strlen(val);
+            if (vlen >= desc_len) vlen = desc_len - 1;
+            os_memcpy(desc, val, vlen);
+            desc[vlen] = '\0';
+        } else if (current_key == 3) {
+            size_t vlen = os_strlen(val);
+            if (vlen >= cat_len) vlen = cat_len - 1;
+            os_memcpy(cat, val, vlen);
+            cat[vlen] = '\0';
+        }
+    }
+
     /* Return content after closing --- */
-    const char *after = end + 4; /* skip "\n---" */
+    const char *after = end + 3; /* skip "---" */
     if (*after == '\n') after++;
     return after;
 }
@@ -179,7 +293,10 @@ static int scan_skills_in_dir(const char *dir_path, int depth)
                           desc, sizeof(desc),
                           cat, sizeof(cat));
 
-        if (!name[0]) continue; /* must have a name */
+        if (!name[0]) {
+            LOG_INFO("Skills: skipping '%s' — no 'name' in frontmatter", full);
+            continue;
+        }
 
         /* Use directory name as fallback category */
         if (!cat[0]) {
@@ -234,6 +351,14 @@ int skill_scan(void)
 {
     if (!g_ctx) return -1;
 
+    /* Free all cached bodies before re-scanning */
+    for (int i = 0; i < g_ctx->count; i++) {
+        if (g_ctx->entries[i].body_cache) {
+            os_free(g_ctx->entries[i].body_cache);
+            g_ctx->entries[i].body_cache = NULL;
+            g_ctx->entries[i].body_cache_len = 0;
+        }
+    }
     g_ctx->count = 0;
     g_ctx->index_dirty = 1;
 
@@ -339,6 +464,15 @@ char *skill_load(const char *name)
     }
     if (!match) return NULL;
 
+    /* Return cached body if available */
+    if (match->body_cache) {
+        char *result = (char *)os_alloc(match->body_cache_len + 1);
+        if (!result) return NULL;
+        os_memcpy(result, match->body_cache, match->body_cache_len);
+        result[match->body_cache_len] = '\0';
+        return result;
+    }
+
     /* Read the file */
     os_file_handle_t fh = os_file_open(match->path, "r");
     if (!fh) return NULL;
@@ -356,12 +490,22 @@ char *skill_load(const char *name)
                                           desc_discard, sizeof(desc_discard),
                                           cat_discard, sizeof(cat_discard));
 
-    /* Allocate and return the body */
     size_t blen = os_strlen(body);
-    char *result = (char *)os_alloc(blen + 1);
+    size_t copy_len = blen < SKILL_CACHE_MAX ? blen : SKILL_CACHE_MAX;
+
+    /* Cache the body */
+    match->body_cache = (char *)os_alloc(copy_len + 1);
+    if (match->body_cache) {
+        os_memcpy(match->body_cache, body, copy_len);
+        match->body_cache[copy_len] = '\0';
+        match->body_cache_len = copy_len;
+    }
+
+    /* Allocate and return the body */
+    char *result = (char *)os_alloc(copy_len + 1);
     if (!result) return NULL;
-    os_memcpy(result, body, blen);
-    result[blen] = '\0';
+    os_memcpy(result, body, copy_len);
+    result[copy_len] = '\0';
     return result;
 }
 
@@ -411,6 +555,8 @@ static int skill_manager_start(framework_module_t *mod)
 {
     (void)mod;
     LOG_INFO("SkillManager: %d skill(s) indexed", g_ctx ? g_ctx->count : 0);
+    /* Register skill tools (list_skills, load_skill) with the tool_manager */
+    skill_tools_register();
     return 0;
 }
 
@@ -418,6 +564,13 @@ static int skill_manager_deinit(framework_module_t *mod)
 {
     (void)mod;
     if (g_ctx) {
+        /* Free cached bodies */
+        for (int i = 0; i < g_ctx->count; i++) {
+            if (g_ctx->entries[i].body_cache) {
+                os_free(g_ctx->entries[i].body_cache);
+                g_ctx->entries[i].body_cache = NULL;
+            }
+        }
         os_free(g_ctx);
         g_ctx = NULL;
     }

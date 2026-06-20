@@ -108,6 +108,26 @@ void memfile_load(const char *path, memfile_t *mf, int limit)
     if (n > 0) {
         buf[n] = '\0';
         parse_entries(buf, mf);
+
+        /* Dedup loaded entries (clean up stale on-disk duplicates) */
+        int deduped = 0;
+        for (int i = 0; i < mf->count; i++) {
+            for (int j = i + 1; j < mf->count; ) {
+                if (os_strcmp(mf->entries[i], mf->entries[j]) == 0) {
+                    for (int k = j; k < mf->count - 1; k++)
+                        os_memcpy(mf->entries[k], mf->entries[k + 1],
+                                  MEMFILE_ENTRY_MAX);
+                    mf->count--;
+                    deduped++;
+                } else {
+                    j++;
+                }
+            }
+        }
+        if (deduped > 0) {
+            recalc_total(mf);
+            memfile_save(mf);
+        }
     }
 }
 
@@ -118,6 +138,12 @@ int memfile_add(memfile_t *mf, const char *text)
     size_t tlen = os_strlen(text);
     if (tlen >= MEMFILE_ENTRY_MAX)
         tlen = MEMFILE_ENTRY_MAX - 1;
+
+    /* Dedup: skip if exact text already exists */
+    for (int i = 0; i < mf->count; i++) {
+        if (os_strcmp(mf->entries[i], text) == 0)
+            return 0;  /* already present, no-op */
+    }
 
     /* Estimate: existing total + new entry + separator if not first */
     int add_cost = (int)tlen + (mf->count > 0 ? 3 : 0);

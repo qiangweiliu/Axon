@@ -526,11 +526,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
               char _c = _q[_i]; prompt_buf[pos++] = (_c == '\n') ? ' ' : _c; } \
           prompt_buf[pos] = '\0'; } \
         if (debug) { \
-            os_fprintf_stderr(DIM "──[DEBUG: Prompt Layer 1-3]───────────────" RST "\n"); \
-            int _sz = (int)os_strlen(prompt_buf) < 2000 ? (int)os_strlen(prompt_buf) : 2000; \
-            os_fprintf_stderr(DIM "%.*s" RST "\n", _sz, prompt_buf); \
-            if (os_strlen(prompt_buf) > 2000) \
-                os_fprintf_stderr(DIM "... (%zu more bytes)" RST "\n", os_strlen(prompt_buf) - 2000); \
+            os_fprintf_stderr(DIM "──[DEBUG: Prompt Layer 1-3] (%zu bytes)──" RST "\n", \
+                              os_strlen(prompt_buf)); \
+            os_fprintf_stderr(DIM "%s" RST "\n", prompt_buf); \
             os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n"); \
         } \
     } while(0)
@@ -564,11 +562,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
 
     /* Debug: raw model response */
     if (debug && resp->content) {
-        os_fprintf_stderr(DIM "──[DEBUG: Phase 1 Response]────────────────" RST "\n");
-        int _sz = (int)os_strlen(resp->content) < 2000 ? (int)os_strlen(resp->content) : 2000;
-        os_fprintf_stderr(DIM "%.*s" RST "\n", _sz, resp->content);
-        if (os_strlen(resp->content) > 2000)
-            os_fprintf_stderr(DIM "... (%zu more bytes)" RST "\n", os_strlen(resp->content) - 2000);
+        os_fprintf_stderr(DIM "──[DEBUG: Phase 1 Response] (%zu bytes)───" RST "\n",
+                          os_strlen(resp->content));
+        os_fprintf_stderr(DIM "%s" RST "\n", resp->content);
         os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n");
     }
 
@@ -684,6 +680,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
                     agent_context_t actx = {
                         .base_prompt = agent_base,
                         .max_depth = 4,
+                        .debug = cfg ? cfg->debug : 0,
                     };
                     int rc = agent_run(endpoint, api_key, model,
                                        &actx, question, agent_answer, sizeof(agent_answer));
@@ -742,20 +739,100 @@ int handle_ask(const char *question, char *out, size_t out_len)
             agent_context_t actx = {
                 .base_prompt = agent_base,
                 .max_depth = 4,
+                .debug = cfg ? cfg->debug : 0,
             };
             int rc = agent_run(endpoint, api_key, model,
                                &actx, question, agent_answer, sizeof(agent_answer));
 
-            /* Use agent result as final output */
+            /* Print agent's final answer */
+            os_printf("%s\n", agent_answer);
+
+            /* Parse directives from agent_answer (NOTE/PROFILE/FORGET/ARCHIVE etc.) */
+            const char *dp = agent_answer;
+            while (dp) {
+                const char *d_note   = strstr(dp, "[NOTE: ");
+                const char *d_prof   = strstr(dp, "[PROFILE: ");
+                const char *d_forg   = strstr(dp, "[FORGET: ");
+                const char *d_recall = strstr(dp, "[RECALL:");
+                const char *d_seman  = strstr(dp, "[SEMANTIC:");
+                const char *d_arch   = strstr(dp, "[ARCHIVE:");
+                const char *earliest = NULL;
+                int dkind = 0, dplen = 0;
+
+                if (d_note   && (!earliest || d_note < earliest))   { earliest = d_note;   dkind = 1; dplen = 7; }
+                if (d_prof   && (!earliest || d_prof < earliest))   { earliest = d_prof;   dkind = 2; dplen = 10; }
+                if (d_forg   && (!earliest || d_forg < earliest))   { earliest = d_forg;   dkind = 3; dplen = 9; }
+                if (d_recall && (!earliest || d_recall < earliest)) { earliest = d_recall; dkind = 6; dplen = 8; }
+                if (d_seman  && (!earliest || d_seman < earliest))  { earliest = d_seman;  dkind = 7; dplen = 10; }
+                if (d_arch   && (!earliest || d_arch < earliest))   { earliest = d_arch;   dkind = 5; dplen = 9; }
+                if (!earliest) break;
+
+                const char *dstart = earliest + dplen;
+                const char *dend = strstr(dstart, "]");
+                if (!dend) break;
+
+                size_t dclen = (size_t)(dend - dstart);
+                if (dclen > 0) {
+                    char dname[1024];
+                    size_t dcp = dclen < sizeof(dname) - 1 ? dclen : sizeof(dname) - 1;
+                    os_memcpy(dname, dstart, dcp);
+                    dname[dcp] = '\0';
+
+                    char dfb[128] = "";
+                    if (dkind == 1) {
+                        handle_note(dname, dfb, sizeof(dfb));
+                    } else if (dkind == 2) {
+                        handle_profile(dname, dfb, sizeof(dfb));
+                    } else if (dkind == 3) {
+                        handle_forget(dname, dfb, sizeof(dfb));
+                    } else if (dkind == 5) {
+                        archive_handle_directive(dname);
+                        archive_bump_recall(dname);
+                        archive_flush_segment(ARC_IMP_MEDIUM);
+                        archive_set_segment_topic(dname);
+                        os_snprintf(dfb, sizeof(dfb), "Archived");
+                    } else if (dkind == 6) {
+                        char recall_buf[4096];
+                        archive_recall(dname, recall_buf, sizeof(recall_buf));
+                        os_snprintf(dfb, sizeof(dfb), "Recall results below");
+                        os_printf("\n%s\n", recall_buf);
+                    } else if (dkind == 7) {
+                        archive_handle_semantic(dname);
+                        os_snprintf(dfb, sizeof(dfb), "Semantic stored");
+                    }
+                    if (dfb[0]) os_printf(DIM "%s" RST "\n", dfb);
+                }
+                dp = dend + 1;
+            }
+
+            /* Auto-log the agent answer */
+            os_file_handle_t lf = os_file_open("conversations.log", "a");
+            if (lf) {
+                char logline[4096];
+                int n = os_snprintf(logline, sizeof(logline),
+                    "[%llu] Q: %s\nA: %s\n\n",
+                    (unsigned long long)(os_clock_ms()), question, agent_answer);
+                if (n > 0) os_file_write(lf, logline, (size_t)n);
+                os_file_close(lf);
+            }
+            archive_append_log(NULL, question, agent_answer);
+            archive_feed_turn(question, agent_answer);
+
+            /* Stats bar */
             if (out) {
                 size_t pos = 0;
                 if (rc == 0)
                     pos += os_snprintf(out + pos, out_len - pos, "  %.1fs", 0.0);
+                if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
+                    char mu[48]="", uu[48]="";
+                    if (g_ctx->mem.count > 0) memfile_usage(&g_ctx->mem, mu, sizeof(mu));
+                    if (g_ctx->user.count > 0) memfile_usage(&g_ctx->user, uu, sizeof(uu));
+                    pos += os_snprintf(out + pos, out_len - pos, DIM " ‖ " RST);
+                    if (g_ctx->mem.count > 0) pos += os_snprintf(out + pos, out_len - pos, DIM "mem %s" RST, mu);
+                    if (g_ctx->user.count > 0) pos += os_snprintf(out + pos, out_len - pos, DIM " · you %s" RST, uu);
+                }
                 os_snprintf(out + pos, out_len - pos, RST);
             }
-
-            /* Print agent's final answer */
-            os_printf("%s\n", agent_answer);
 
             llm_response_free(resp);
             return 0;
@@ -790,11 +867,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
         if (g_ctx->saw_reasoning == 1) { print_reasoning_bottom(); os_printf("\n"); }
 
         if (debug && resp2->content) {
-            os_fprintf_stderr(DIM "──[DEBUG: Phase 2 Response]────────────────" RST "\n");
-            int _sz = (int)os_strlen(resp2->content) < 2000 ? (int)os_strlen(resp2->content) : 2000;
-            os_fprintf_stderr(DIM "%.*s" RST "\n", _sz, resp2->content);
-            if (os_strlen(resp2->content) > 2000)
-                os_fprintf_stderr(DIM "... (%zu more bytes)" RST "\n", os_strlen(resp2->content) - 2000);
+            os_fprintf_stderr(DIM "──[DEBUG: Phase 2 Response] (%zu bytes)───" RST "\n",
+                              os_strlen(resp2->content));
+            os_fprintf_stderr(DIM "%s" RST "\n", resp2->content);
             os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n");
         }
 

@@ -154,6 +154,14 @@ int os_fprintf_stderr(const char *format, ...);
 int os_printf(const char *format, ...);
 int os_fputc(int c, os_file_handle_t fh);
 
+/*
+ * os_confirm: 向用户打印提示并等待 y/N 确认。
+ * prompt: 显示给用户的问题（不含 " (y/N): " 后缀）。
+ * 返回 1 = 确认, 0 = 拒绝。
+ * 读取 stdin，接受 y/Y/yes 为确认。
+ */
+int os_confirm(const char *prompt);
+
 /* =========================================================================
  * 可变参数
  * ========================================================================= */

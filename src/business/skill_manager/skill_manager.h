@@ -34,6 +34,8 @@ typedef struct {
     char description[256];
     char category[64];
     char path[512];         /* absolute path to SKILL.md */
+    char *body_cache;       /* cached body content (NULL = not cached), freed on scan/deinit */
+    size_t body_cache_len;  /* length of cached body */
 } skill_entry_t;
 
 /*
@@ -95,5 +97,11 @@ void skill_set_dir(const char *path);
  * Returns a pointer to internal buffer (valid until next skill_scan()).
  */
 const char *skill_get_names_line(void);
+
+/*
+ * Register list_skills and load_skill as tools in the tool_manager.
+ * Called from skill_manager_start() after skill index is built.
+ */
+int skill_tools_register(void);
 
 #endif /* BUSINESS_SKILL_MANAGER_H */

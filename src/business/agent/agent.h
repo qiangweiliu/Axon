@@ -17,6 +17,7 @@
 typedef struct {
     const char *base_prompt;    /* system + interface + skills + language + topics + memory */
     int         max_depth;      /* max tool call iterations (default 6) */
+    int         debug;          /* if true, dump full prompts and responses to stderr */
 } agent_context_t;
 
 /*

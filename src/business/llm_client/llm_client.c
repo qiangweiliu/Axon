@@ -133,20 +133,37 @@ static void sse_feed(sse_parser_t *sp, const char *data, size_t len)
         sp->buf[sp->pos++] = data[i];
         sp->buf[sp->pos] = '\0';
 
-        if (sp->pos >= 2 && sp->buf[sp->pos-1] == '\n' &&
-            sp->buf[sp->pos-2] == '\n') {
+        /* Detect event boundary: \n\n or \r\n\r\n */
+        int is_event = 0;
+        if (sp->pos >= 2) {
+            if (sp->buf[sp->pos-1] == '\n' && sp->buf[sp->pos-2] == '\n')
+                is_event = 1;
+            else if (sp->pos >= 4 &&
+                     sp->buf[sp->pos-1] == '\n' && sp->buf[sp->pos-2] == '\r' &&
+                     sp->buf[sp->pos-3] == '\n' && sp->buf[sp->pos-4] == '\r')
+                is_event = 1;
+        }
+        if (is_event) {
             char *line = sp->buf;
+            LOG_DEBUG("SSE: event detected, buf=%.150s", sp->buf);
             while (line && *line && line < sp->buf + sp->pos) {
                 if (os_strncmp(line, "data: ", 6) == 0) {
                     char *json = line + 6;
+                    /* Strip trailing \r and \n */
                     char *end = json + os_strlen(json);
-                    while (end > json && (*end == '\n' || *end == '\r'))
-                        { *end = '\0'; end--; }
+                    while (end > json) {
+                        end--;
+                        if (*end == '\n' || *end == '\r')
+                            *end = '\0';
+                        else
+                            break;
+                    }
                     if (os_strcmp(json, "[DONE]") == 0) { sp->done = 1; }
                     else {
                         int extracted_is_reasoning = 0;
                         char *content = m->extract_content(json, NULL, &extracted_is_reasoning);
                         if (content && content[0]) {
+                            LOG_DEBUG("SSE: content='%s'", content);
                             sp->tokens++;
                             uint64_t elapsed = os_clock_ms() - sp->t0;
                             if (sp->cb)
@@ -168,6 +185,8 @@ static void sse_feed(sse_parser_t *sp, const char *data, size_t len)
                             if (ct > sp->completion_tokens) sp->completion_tokens = ct;
                             int pt = m->extract_int(json, "prompt_tokens");
                             if (pt > sp->prompt_tokens) sp->prompt_tokens = pt;
+                        } else {
+                            
                         }
                         if (content) os_free(content);
                     }
@@ -209,6 +228,7 @@ llm_response_t *llm_chat(const char *endpoint,
 
     LOG_DEBUG("LLM: POST %s:%d%s (%s) [%s] via %s",
              host, port, path, model, is_https ? "TLS" : "plain", m->name);
+    LOG_DEBUG("LLM: request body (%d bytes): %s", blen, body);
 
     /* Append /chat/completions */
     {
@@ -253,6 +273,8 @@ llm_response_t *llm_chat(const char *endpoint,
 
     LOG_DEBUG("LLM: HTTP %d, body_len=%zu", http->status_code, http->body_len);
     if (http->status_code != 200 || !http->body) {
+        LOG_WARN("LLM: HTTP %d (expected 200), body=%.100s",
+                 http->status_code, http->body ? http->body : "(null)");
         http_response_free(http); return NULL;
     }
 
@@ -299,6 +321,7 @@ llm_response_t *llm_chat_stream(const char *endpoint,
 
     LOG_DEBUG("LLM: STREAM %s:%d%s (%s) [%s] via %s",
              host, port, path, model, is_https ? "TLS" : "plain", m->name);
+    LOG_DEBUG("LLM: request body (%d bytes): %s", blen, body);
 
     /* Append /chat/completions */
     {
