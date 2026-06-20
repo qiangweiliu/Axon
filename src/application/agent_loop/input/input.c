@@ -84,6 +84,17 @@ int read_line_raw(char *buf, int max)
 
         if (c == 0x03) { buf[0] = '\0'; return 0; }
 
+        /* ESC sequence — silently consume arrow keys and other controls */
+        if (c == 0x1b) {
+            unsigned char n[2];
+            if (read(STDIN_FILENO, &n[0], 1) == 1 && read(STDIN_FILENO, &n[1], 1) == 1) {
+                if (n[0] == '[' && n[1] >= 'A' && n[1] <= 'D')
+                    continue;  /* arrow key ← ↑ → ↓, silently consumed */
+                /* Other ESC sequences fall through and are ignored */
+            }
+            continue;
+        }
+
         if (c >= 0x20 || (c & 0xC0) == 0xC0) {
             if (pos < max - 4) {
                 buf[pos++] = c;
