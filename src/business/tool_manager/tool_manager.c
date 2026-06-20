@@ -512,8 +512,36 @@ static int bash_execute(const char *args_json, char *result,
     LOG_DEBUG("ToolManager: bash cmd (first 300): %.*s",
               (int)(os_strlen(cmd_buf) < 300 ? os_strlen(cmd_buf) : 300), cmd_buf);
 
-    /* Execute via popen */
-    FILE *fp = popen(cmd_buf, "r");
+    /* Safety check: block destructive commands */
+    {
+        const char *danger[] = {
+            "rm -rf /", "rm -fr /", "rm -rf ~", "mkfs.", "dd if=",
+            ":(){ :|:& };:", "> /dev/sda", "chmod 777 /",
+            "wget", "curl",  /* network download — allow if whitelisted */
+        };
+        int blocked = 0;
+        for (size_t di = 0; di < sizeof(danger)/sizeof(danger[0]); di++) {
+            if (strstr(cmd_buf, danger[di])) {
+                /* Allow wget/curl to local paths only */
+                if ((os_strncmp(danger[di], "wget", 4) == 0 ||
+                     os_strncmp(danger[di], "curl", 4) == 0) &&
+                    !strstr(cmd_buf, " /tmp/") && !strstr(cmd_buf, " /home/"))
+                    continue;
+                blocked = 1;
+                break;
+            }
+        }
+        if (blocked) {
+            return os_snprintf(result, result_len,
+                "{\"error\":\"blocked: unsafe command pattern detected\"}");
+        }
+    }
+
+    /* Execute via popen with 30s timeout */
+    char timeout_cmd[4096 + 32];
+    os_snprintf(timeout_cmd, sizeof(timeout_cmd),
+                "timeout 30 %s", cmd_buf);
+    FILE *fp = popen(timeout_cmd, "r");
     if (!fp) {
         LOG_DEBUG("ToolManager: bash popen failed for '%s'", cmd_buf);
         return os_snprintf(result, result_len,
