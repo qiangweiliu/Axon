@@ -165,8 +165,11 @@ static void on_escape(char seq1, char seq2,
         /* ── Right ── */
         case 'C':
             if (*cursor < *len) {
+                /* Don't break in the middle of a multi-byte UTF-8 char */
+                if ((buf[*cursor] & 0xC0) == 0x80)
+                    return;
                 (*cursor)++;
-                write(STDOUT_FILENO, "\033[C", 3);
+                redraw_line(buf, *len, *cursor);
             }
             return;
 
@@ -175,9 +178,9 @@ static void on_escape(char seq1, char seq2,
             if (*cursor > 0) {
                 /* Don't break in the middle of a multi-byte UTF-8 char */
                 if ((buf[*cursor - 1] & 0xC0) == 0x80)
-                    return; /* middle byte — can't position there */
+                    return;
                 (*cursor)--;
-                write(STDOUT_FILENO, "\033[D", 3);
+                redraw_line(buf, *len, *cursor);
             }
             return;
         }
