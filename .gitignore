@@ -1,30 +1,28 @@
+
 # Build
-build/
-*.o
-*.a
-*.so
-
-# Runtime
-agent.log
-conversations.log
-memories/
-prompt.txt
-data/
-
-# Personal / sensitive
-config.yml
-DESIGN.md
-plan.md
-
 # IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-.cache/
-
 # OS
+# Personal / sensitive
+# Runtime
+*.a
+*.log
+*.o
+*.so
+*.swo
+*.swp
 .DS_Store
+.cache/
+.idea/
+.vscode/
+DESIGN.md
 Thumbs.db
+agent.log
+build/
+config.yml
 config.yml.old
+conversations.log
+data/
+memories/
+plan.md
+prompt.txt
 stderr*.log
