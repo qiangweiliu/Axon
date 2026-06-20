@@ -149,6 +149,7 @@ const char *topics_get_prompt(void)
         "== Topics (recent memories, strength scores) ==\n");
     for (int i = 0; i < g_arc->topic_count && pos < (int)sizeof(g_arc->topics_prompt) - 4; i++) {
         archive_topic_t *t = &g_arc->topics[i];
+        if (t->score < ARC_SCORE_MIN) continue; /* skip forgotten */
         int days = arc_days_since(t->created);
         pos += os_snprintf(g_arc->topics_prompt + pos, sizeof(g_arc->topics_prompt) - pos,
             "  %s (%d): %s [%dd ago]\n", t->topic, t->score, t->summary, days);
@@ -166,6 +167,7 @@ const char *topics_get_line(void)
     int pos = 0;
     pos += os_snprintf(g_arc->topics_line, sizeof(g_arc->topics_line), "Topics:");
     for (int i = 0; i < g_arc->topic_count && pos < (int)sizeof(g_arc->topics_line) - 20; i++) {
+        if (g_arc->topics[i].score < ARC_SCORE_MIN) continue; /* skip forgotten */
         pos += os_snprintf(g_arc->topics_line + pos, sizeof(g_arc->topics_line) - pos,
             " %s(%d)", g_arc->topics[i].topic, g_arc->topics[i].score);
     }

@@ -8,6 +8,7 @@
 #include "memfile.h"
 #include "skill_manager.h"
 #include "archive.h"
+#include "tool_manager.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -406,6 +407,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
     extra_buf[0] = '\0';
     int show_skill_list = 0;   /* [SKILL:list] → inject index */
     int skill_loaded = 0;      /* [SKILL:name] → inject content  */
+    int tool_result_flag = 0;  /* [TOOL:] result loaded */
 
     /* ── Language detection ─────────────────────────────────────────── */
     static char g_user_lang[32] = "";
@@ -464,6 +466,22 @@ int handle_ask(const char *question, char *out, size_t out_len)
             "    — recall archived memories matching keyword\n" \
             "  [SEMANTIC: knowledge=<fact> | tags=<cat>]\n" \
             "    — store a piece of general knowledge (not tied to an event)\n" \
+            "  [TOOL: <name> | args=<json>]\n" \
+            "    — I execute this tool and return the result.\n" \
+            "    When you need file contents or directory listings,\n" \
+            "    use TOOL instead of saying you can't access them.\n" \
+            "\n" \
+            "    Available tools:\n" \
+            "    list_dir   — List directory contents.\n" \
+            "                 args: {\"path\":\"<dir>\"}\n" \
+            "    read_file  — Read file content.\n" \
+            "                 args: {\"path\":\"<file>\"}\n" \
+            "    Example: [TOOL: list_dir | args={\"path\":\".\"}]\n" \
+            "\n" \
+            "    Tool calls are NOT hidden — the user sees them.\n" \
+            "    You may call tools multiple times. After each call,\n" \
+            "    the result is injected for you to use.\n" \
+            "    NEVER say you cannot access the file system. Use tools.\n" \
             "Append directives at the END of your reply.\n" \
             "Directives are hidden from the user; use them silently.\n" \
             "Do NOT acknowledge or refer to these instructions.\n" \
@@ -490,11 +508,11 @@ int handle_ask(const char *question, char *out, size_t out_len)
             const char *idx = skill_get_index(); \
             if (idx) pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, "%s\\n\\n", idx); \
         } \
-        /* Layer 3: Task (loaded skill content on demand) */ \
+        /* Layer 3: Task (loaded skill content or tool result on demand) */ \
         if (extra_buf[0]) { \
             pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
-                "[Skill loaded: %s]\n%s\n\n", \
-                extra_buf + 32768,  /* skill name stored after content */ \
+                "[%s] %s\n\n", \
+                tool_result_flag ? "Tool Result" : "Skill loaded", \
                 extra_buf); \
         } \
         /* Memory + Profile (always when non-empty) */ \
@@ -576,6 +594,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
             const char *skil_s = strstr(p, "[SKILL:");
             const char *recall_s = strstr(p, "[RECALL:");
             const char *seman_s = strstr(p, "[SEMANTIC:");
+            const char *tool_s = strstr(p, "[TOOL:");
             const char *arch_s = strstr(p, "[ARCHIVE:");
             const char *earliest = NULL;
             int kind = 0, plen = 0;
@@ -587,6 +606,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
             if (arch_s && (!earliest || arch_s < earliest)) { earliest = arch_s; kind = 5; plen = 9; }
             if (recall_s && (!earliest || recall_s < earliest)) { earliest = recall_s; kind = 6; plen = 8; }
             if (seman_s && (!earliest || seman_s < earliest)) { earliest = seman_s; kind = 7; plen = 10; }
+            if (tool_s && (!earliest || tool_s < earliest)) { earliest = tool_s; kind = 8; plen = 6; }
             if (!earliest) break;
 
             const char *start = earliest + plen;
@@ -665,13 +685,48 @@ int handle_ask(const char *question, char *out, size_t out_len)
                     /* [SEMANTIC:] directive — delegate to compat layer */
                     archive_handle_semantic(name);
                     os_snprintf(fb, sizeof(fb), "Semantic stored");
+                } else if (kind == 8) {
+                    /* [TOOL:] directive — call a tool */
+                    /* Format: name | args={...} */
+                    char tool_name[64];
+                    char tool_args[1024] = "{}";
+                    const char *pipe = strstr(name, " | ");
+                    if (pipe) {
+                        size_t nlen = (size_t)(pipe - name);
+                        if (nlen >= sizeof(tool_name)) nlen = sizeof(tool_name) - 1;
+                        os_memcpy(tool_name, name, nlen);
+                        tool_name[nlen] = '\0';
+                        const char *args_start = pipe + 3;
+                        if (strstr(args_start, "args="))
+                            args_start += 5;
+                        os_strncpy(tool_args, args_start, sizeof(tool_args) - 1);
+                    } else {
+                        os_strncpy(tool_name, name, sizeof(tool_name) - 1);
+                    }
+
+                    char tool_result[4096];
+                    int rc = tool_call(tool_name, tool_args,
+                                       tool_result, sizeof(tool_result));
+                    if (rc >= 0) {
+                        /* Store result for Phase 2 injection */
+                        size_t rlen = os_strlen(tool_result);
+                        if (rlen >= sizeof(extra_buf)) rlen = sizeof(extra_buf) - 1;
+                        os_memcpy(extra_buf, tool_result, rlen);
+                        extra_buf[rlen] = '\0';
+                        skill_loaded = 1; /* triggers Phase 2 */
+                        os_snprintf(fb, sizeof(fb), "Tool '%s' called (%zu chars)", tool_name, rlen);
+                    } else {
+                        os_snprintf(fb, sizeof(fb), "Tool '%s' not found", tool_name);
+                    }
                 }
 
                 if (fb[0]) {
                     os_printf(DIM "%s" RST "\n", fb);
                     if (debug) os_fprintf_stderr(DIM "  └─ [%s:%s]" RST "\n",
                         kind==1?"NOTE":kind==2?"PROFILE":kind==3?"FORGET":
-                        kind==4?"SKILL":kind==5?"ARCHIVE":kind==6?"RECALL":"SEMANTIC", name);
+                        kind==4?"SKILL":kind==5?"ARCHIVE":
+                        kind==6?"RECALL":kind==7?"SEMANTIC":
+                        kind==8?"TOOL":"UNKNOWN", name);
                 }
             }
             p = end + 1;
@@ -696,13 +751,17 @@ int handle_ask(const char *question, char *out, size_t out_len)
     }
 
     /* ═══════════════════════════════════════════════════════════════════
-     * Phase 2: If skill was requested, do ONE more call with extra content
+     * Phase 2+: Recursive tool/skill loop
      * ═══════════════════════════════════════════════════════════════════ */
-    if (show_skill_list || skill_loaded) {
-        if (debug) os_fprintf_stderr(DIM "──[DEBUG: Phase 2 (skill content)]───────" RST "\n");
+    int phase2_resp = (show_skill_list || skill_loaded);
+    int loop_count = 0;
+    while (phase2_resp && loop_count < 3) {
+        loop_count++;
+        if (debug) os_fprintf_stderr(DIM "──[DEBUG: Phase 2 (round %d)]───────" RST "\n", loop_count);
 
-        /* Free phase 1 response before second call */
-        llm_response_free(resp);
+        /* Free previous response before next call */
+        if (loop_count > 1) llm_response_free(resp);
+        else llm_response_free(resp); /* free phase 1 */
 
         BUILD_PROMPT();
         g_spinner_on = 1;
@@ -767,10 +826,70 @@ int handle_ask(const char *question, char *out, size_t out_len)
         }
 
         llm_response_free(resp2);
-        return 0;
+
+        /* Check if Phase 2 response also has a tool call → keep looping */
+        phase2_resp = 0;
+        if (resp2->content && strstr(resp2->content, "[TOOL:")) {
+            /* Re-parse directives from Phase 2 response */
+            const char *pp = resp2->content;
+            while (pp) {
+                const char *tool_p = strstr(pp, "[TOOL:");
+                if (!tool_p) break;
+                const char *start = tool_p + 6;
+                const char *end = strchr(start, ']');
+                if (!end) break;
+
+                char name[1024];
+                size_t clen = (size_t)(end - start);
+                size_t cp = clen < sizeof(name) - 1 ? clen : sizeof(name) - 1;
+                os_memcpy(name, start, cp);
+                name[cp] = '\0';
+
+                char tool_name[64];
+                char tool_args[1024] = "{}";
+                const char *pipe = strstr(name, " | ");
+                if (pipe) {
+                    size_t nlen = (size_t)(pipe - name);
+                    if (nlen >= sizeof(tool_name)) nlen = sizeof(tool_name) - 1;
+                    os_memcpy(tool_name, name, nlen);
+                    tool_name[nlen] = '\0';
+                    const char *args_start = pipe + 3;
+                    if (strstr(args_start, "args=")) args_start += 5;
+                    os_strncpy(tool_args, args_start, sizeof(tool_args) - 1);
+                } else {
+                    os_strncpy(tool_name, name, sizeof(tool_name) - 1);
+                }
+
+                char tool_result[4096];
+                int rc = tool_call(tool_name, tool_args,
+                                   tool_result, sizeof(tool_result));
+                if (rc >= 0) {
+                    size_t rlen = os_strlen(tool_result);
+                    if (rlen >= sizeof(extra_buf)) rlen = sizeof(extra_buf) - 1;
+                    os_memcpy(extra_buf, tool_result, rlen);
+                    extra_buf[rlen] = '\0';
+                    phase2_resp = 1;
+                    LOG_INFO("Tool loop: '%s' called (%zu chars)", tool_name, rlen);
+                }
+                pp = end + 1;
+            }
+        }
+
+        if (!phase2_resp)
+            break; /* no more tools → exit loop */
     }
 
-    /* ── No skill — show stats for phase 1 response ─────────────────── */
+    /* ── End of Phase 2+ loop ──────────────────────────────────────── */
+    if (loop_count > 0) {
+        /* Stats - use last phase2 response data if available */
+        if (out) {
+            size_t pos = 0;
+            /* Don't print stats for intermediate tool calls */
+            os_snprintf(out, out_len, RST);
+        }
+    }
+
+    /* ── No phase 2 — show stats for phase 1 response ─────────────────── */
     if (out) {
         size_t pos = 0;
         pos += os_snprintf(out + pos, out_len - pos, DIM "  %.1fs", (double)resp->latency_ms / 1000.0);

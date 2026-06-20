@@ -57,6 +57,15 @@ int handle_recall(const char *query, char *out, size_t out_len)
 void handle_note(const char *text, char *out, size_t out_len)
 {
     if (!text || !*text) return;
+
+    /* Skip if identical text already exists (dedup) */
+    for (int i = 0; i < g_ctx->mem.count; i++) {
+        if (os_strcmp(g_ctx->mem.entries[i], text) == 0) {
+            if (out) os_snprintf(out, out_len, GRY "✓ already noted" RST);
+            return;
+        }
+    }
+
     if (memfile_add(&g_ctx->mem, text) != 0) {
         if (out) os_snprintf(out, out_len,
             RED "%% memory full" RST " — use " GRY "forget" RST " to free space");

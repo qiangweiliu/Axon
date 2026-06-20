@@ -22,7 +22,7 @@ int directives_handle_archive(const char *text)
 
     const char *p = text;
     while (*p) {
-        while (*p == ' ' || *p == '|') p++;
+        while (*p == ' ' || *p == '|' || *p == ',') p++;
         if (!*p) break;
         const char *eq = strchr(p, '=');
         if (!eq) break;
@@ -30,6 +30,7 @@ int directives_handle_archive(const char *text)
         size_t klen = (size_t)(eq - p);
         const char *val_start = eq + 1;
         const char *val_end = strchr(val_start, '|');
+        if (!val_end) val_end = strchr(val_start, ',');
         if (!val_end) val_end = p + os_strlen(p);
         size_t vlen = (size_t)(val_end - val_start);
 

@@ -129,6 +129,9 @@ static int process_line(const char *line, char *out, size_t out_len)
     } else if (os_strcmp(line, "clear") == 0 ||
                os_strcmp(line, "memory clear") == 0) {
         archive_clear_all();
+        /* Also reset in-memory memfiles */
+        memfile_load("data/memory/l0/working.md", &g_ctx->mem, MEMFILE_MEMORY_LIMIT);
+        memfile_load("data/memory/l0/profile.md", &g_ctx->user, MEMFILE_USER_LIMIT);
         if (out) os_snprintf(out, out_len, GRN "✓ All memory cleared" RST);
     } else {
         return handle_ask(line, out, out_len);

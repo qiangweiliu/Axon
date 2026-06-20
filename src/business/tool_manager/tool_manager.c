@@ -9,9 +9,11 @@
 #include "framework_internal.h"
 #include "os_api.h"
 #include "tool_manager.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #define MAX_TOOLS 64
-
 typedef struct {
     tool_def_t def;
     int        active;
@@ -167,6 +169,107 @@ static int echo_execute(const char *args_json, char *result,
                        "{\"echo\":%s}", args_json ? args_json : "{}");
 }
 
+static int list_dir_execute(const char *args_json, char *result,
+                            size_t result_len, void *user_data)
+{
+    (void)user_data;
+    if (result_len < 4) return -1;
+    result[0] = '\0';
+    size_t pos = 0;
+
+    /* Normalize JSON: replace single quotes with double quotes */
+    char norm_args[1024];
+    if (args_json) {
+        size_t alen = os_strlen(args_json);
+        if (alen >= sizeof(norm_args)) alen = sizeof(norm_args) - 1;
+        for (size_t i = 0; i < alen; i++)
+            norm_args[i] = (args_json[i] == '\'') ? '"' : args_json[i];
+        norm_args[alen] = '\0';
+        args_json = norm_args;
+    }
+
+    /* Parse directory path from JSON args: {"path":"/foo"} */
+    const char *dir_path = ".";
+    if (args_json) {
+        const char *p = strstr(args_json, "\"path\":\"");
+        if (p) {
+            p += 8;
+            char path_buf[256];
+            size_t pi = 0;
+            while (p[pi] && p[pi] != '"' && pi < sizeof(path_buf) - 1) {
+                path_buf[pi] = p[pi];
+                pi++;
+            }
+            path_buf[pi] = '\0';
+            if (pi > 0) dir_path = path_buf;
+        }
+    }
+
+    os_dir_handle_t dh = os_dir_open(dir_path);
+    if (!dh) {
+        return os_snprintf(result, result_len, "{\"error\":\"cannot open directory\"}");
+    }
+
+    pos += os_snprintf(result + pos, result_len - pos, "{\"entries\":[");
+    int first = 1;
+    const char *entry;
+    while ((entry = os_dir_next(dh)) != NULL && pos < result_len - 50) {
+        if (!first) { pos += os_snprintf(result + pos, result_len - pos, ","); }
+        first = 0;
+        pos += os_snprintf(result + pos, result_len - pos, "\"%s\"", entry);
+    }
+    os_dir_close(dh);
+
+    pos += os_snprintf(result + pos, result_len - pos, "]}");
+    return 0;
+}
+
+static int read_file_execute(const char *args_json, char *result,
+                             size_t result_len, void *user_data)
+{
+    (void)user_data;
+    if (result_len < 4) return -1;
+    result[0] = '\0';
+
+    /* Normalize JSON: replace single quotes with double quotes */
+    char norm_args[1024];
+    if (args_json) {
+        size_t alen = os_strlen(args_json);
+        if (alen >= sizeof(norm_args)) alen = sizeof(norm_args) - 1;
+        for (size_t i = 0; i < alen; i++)
+            norm_args[i] = (args_json[i] == '\'') ? '"' : args_json[i];
+        norm_args[alen] = '\0';
+        args_json = norm_args;
+    }
+
+    /* Parse path from JSON: {"path":"/foo/bar"} */
+    const char *path_start = strstr(args_json ? args_json : "", "\"path\":\"");
+    if (!path_start) {
+        return os_snprintf(result, result_len, "{\"error\":\"missing path argument\"}");
+    }
+    path_start += 8;
+    char path[512];
+    size_t pi = 0;
+    while (path_start[pi] && path_start[pi] != '"' && pi < sizeof(path) - 1) {
+        path[pi] = path_start[pi];
+        pi++;
+    }
+    path[pi] = '\0';
+
+    os_file_handle_t fh = os_file_open(path, "r");
+    if (!fh) {
+        return os_snprintf(result, result_len, "{\"error\":\"cannot open file: %s\"}", path);
+    }
+
+    size_t n = os_file_read(fh, result + 1, result_len - 4);
+    os_file_close(fh);
+    result[0] = '{';
+    size_t rp = 1 + n;
+    result[rp] = '}';
+    result[rp + 1] = '\0';
+    return 0;
+}
+
 static int tool_manager_init(framework_module_t *mod)
 {
     g_ctx = (tool_manager_ctx_t *)os_calloc(1, sizeof(tool_manager_ctx_t));
@@ -200,6 +303,27 @@ static int tool_manager_start(framework_module_t *mod)
         .execute = echo_execute,
     };
     tool_register(&echo);
+
+    /* Register code tools */
+    tool_def_t list_dir = {
+        .name = "list_dir",
+        .description = "List directory contents",
+        .params_json = "{\"type\":\"object\",\"properties\":{"
+            "\"path\":{\"type\":\"string\",\"description\":\"directory path\"}"
+            "}}",
+        .execute = list_dir_execute,
+    };
+    tool_register(&list_dir);
+
+    tool_def_t read_file = {
+        .name = "read_file",
+        .description = "Read file content",
+        .params_json = "{\"type\":\"object\",\"properties\":{"
+            "\"path\":{\"type\":\"string\",\"description\":\"file path\"}"
+            "}}",
+        .execute = read_file_execute,
+    };
+    tool_register(&read_file);
 
     LOG_INFO("ToolManager: ready (%d tool%s)",
              g_ctx->tool_count, g_ctx->tool_count == 1 ? "" : "s");
