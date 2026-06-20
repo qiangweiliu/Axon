@@ -27,3 +27,4 @@ plan.md
 .DS_Store
 Thumbs.db
 config.yml.old
+stderr*.log
