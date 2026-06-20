@@ -562,6 +562,16 @@ int handle_ask(const char *question, char *out, size_t out_len)
     if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
     if (g_ctx->saw_reasoning == 1) { print_reasoning_bottom(); os_printf("\n"); }
 
+    /* Streaming produced no visible tokens (SSE extraction failed,
+     * API returned non-SSE format, etc.) but the non-streaming fallback
+     * in llm_chat_stream() succeeded. Display the full response now. */
+    if (!g_ctx->first_token && resp->content && resp->content[0]) {
+        print_answer_top();
+        os_printf("%s", resp->content);
+        print_answer_bottom();
+        os_printf("\n");
+    }
+
     /* Debug: raw model response */
     if (debug && resp->content) {
         os_fprintf_stderr(DIM "──[LLM RESPONSE] (%zu bytes)───────────────" RST "\n",
@@ -867,6 +877,13 @@ int handle_ask(const char *question, char *out, size_t out_len)
 
         if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
         if (g_ctx->saw_reasoning == 1) { print_reasoning_bottom(); os_printf("\n"); }
+
+        if (!g_ctx->first_token && resp2->content && resp2->content[0]) {
+            print_answer_top();
+            os_printf("%s", resp2->content);
+            print_answer_bottom();
+            os_printf("\n");
+        }
 
         if (debug && resp2->content) {
             os_fprintf_stderr(DIM "──[LLM RESPONSE Phase2] (%zu bytes)────────" RST "\n",
