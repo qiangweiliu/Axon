@@ -1,0 +1,7 @@
+# Kconfig — Agent 模块
+
+MODULE_SRCS = agent.c tool_schema.c tool_executor.c
+
+CFLAGS += -Isrc/business/agent
+CFLAGS += -Isrc/business/tool_manager
+CFLAGS += -Isrc/business/llm_client

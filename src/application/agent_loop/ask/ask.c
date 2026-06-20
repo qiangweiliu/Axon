@@ -8,7 +8,7 @@
 #include "memfile.h"
 #include "skill_manager.h"
 #include "archive.h"
-#include "tool_dispatch.h"
+#include "agent.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -406,7 +406,6 @@ int handle_ask(const char *question, char *out, size_t out_len)
     extra_buf[0] = '\0';
     int show_skill_list = 0;   /* [SKILL:list] → inject index */
     int skill_loaded = 0;      /* [SKILL:name] → inject content  */
-    int tool_result_flag = 0;  /* [TOOL:] result loaded */
 
     /* ── Language detection ─────────────────────────────────────────── */
     static char g_user_lang[32] = "";
@@ -465,22 +464,6 @@ int handle_ask(const char *question, char *out, size_t out_len)
             "    — recall archived memories matching keyword\n" \
             "  [SEMANTIC: knowledge=<fact> | tags=<cat>]\n" \
             "    — store a piece of general knowledge (not tied to an event)\n" \
-            "  [TOOL: <name> | args=<json>]\n" \
-            "    — I execute this tool and return the result.\n" \
-            "    When you need file contents or directory listings,\n" \
-            "    use TOOL instead of saying you can't access them.\n" \
-            "\n" \
-            "    Available tools:\n" \
-            "    list_dir   — List directory contents.\n" \
-            "                 args: {\"path\":\"<dir>\"}\n" \
-            "    read_file  — Read file content.\n" \
-            "                 args: {\"path\":\"<file>\"}\n" \
-            "    Example: [TOOL: list_dir | args={\"path\":\".\"}]\n" \
-            "\n" \
-            "    Tool calls are NOT hidden — the user sees them.\n" \
-            "    You may call tools multiple times. After each call,\n" \
-            "    the result is injected for you to use.\n" \
-            "    NEVER say you cannot access the file system. Use tools.\n" \
             "Append directives at the END of your reply.\n" \
             "Directives are hidden from the user; use them silently.\n" \
             "Do NOT acknowledge or refer to these instructions.\n" \
@@ -510,8 +493,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
         /* Layer 3: Task (loaded skill content or tool result on demand) */ \
         if (extra_buf[0]) { \
             pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
-                "[%s] %s\n\n", \
-                tool_result_flag ? "Tool Result" : "Skill loaded", \
+                "[Skill loaded]\n%s\n\n", \
                 extra_buf); \
         } \
         /* Memory + Profile (always when non-empty) */ \
@@ -685,17 +667,28 @@ int handle_ask(const char *question, char *out, size_t out_len)
                     archive_handle_semantic(name);
                     os_snprintf(fb, sizeof(fb), "Semantic stored");
                 } else if (kind == 8) {
-                    /* [TOOL:] directive — delegate to business layer */
-                    char tool_result[4096];
-                    if (tool_dispatch(name, tool_result, sizeof(tool_result)) == 0) {
-                        size_t rlen = os_strlen(tool_result);
+                    /* [TOOL:] directive — delegate to agent_run */
+                    char agent_base[65536];
+                    int ap = 0;
+                    ap += os_snprintf(agent_base + ap, sizeof(agent_base) - ap, "%s", prompt_buf);
+
+                    char agent_answer[AGENT_MAX_RESPONSE];
+                    agent_context_t actx = {
+                        .base_prompt = agent_base,
+                        .max_depth = 4,
+                    };
+                    int rc = agent_run(endpoint, api_key, model,
+                                       &actx, question, agent_answer, sizeof(agent_answer));
+                    if (rc == 0 || rc == 1) {
+                        os_snprintf(fb, sizeof(fb), "Tool agent: %s (%d rounds)",
+                                    rc == 0 ? "completed" : "max depth", 4);
+                        size_t rlen = os_strlen(agent_answer);
                         if (rlen >= sizeof(extra_buf)) rlen = sizeof(extra_buf) - 1;
-                        os_memcpy(extra_buf, tool_result, rlen);
+                        os_memcpy(extra_buf, agent_answer, rlen);
                         extra_buf[rlen] = '\0';
-                        skill_loaded = 1; /* triggers Phase 2 */
-                        os_snprintf(fb, sizeof(fb), "Tool called (%zu chars)", rlen);
+                        skill_loaded = 1;
                     } else {
-                        os_snprintf(fb, sizeof(fb), "Tool dispatch failed: %s", tool_result);
+                        os_snprintf(fb, sizeof(fb), "Tool agent error");
                     }
                 }
 
@@ -729,23 +722,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
         archive_feed_turn(question, resp->content);
     }
 
-    /* ═══════════════════════════════════════════════════════════════════
-     * Phase 2+: Recursive tool/skill loop
-     * ═══════════════════════════════════════════════════════════════════ */
-    int phase2_resp = (show_skill_list || skill_loaded);
-    int loop_count = 0;
-    llm_response_t *resp2 = NULL;
-    while (phase2_resp && loop_count < 3) {
-        loop_count++;
-        if (debug) os_fprintf_stderr(DIM "──[DEBUG: Phase 2 (round %d)]───────" RST "\n", loop_count);
-
-        /* Free previous round's response */
-        if (loop_count == 1) {
-            llm_response_free(resp);  /* free phase 1 response */
-            resp = NULL;              /* prevent double free at end */
-        } else if (resp2) {
-            llm_response_free(resp2); /* free previous phase 2 response */
-        }
+    /* ── Phase 2: skill content or tool result — do one more LLM call ── */
+    if (show_skill_list || skill_loaded) {
+        if (debug) os_fprintf_stderr(DIM "──[DEBUG: Phase 2]───────" RST "\n");
 
         BUILD_PROMPT();
         g_spinner_on = 1;
@@ -754,7 +733,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
         fflush(stdout);
         os_thread_create(&tid, spinner_thread, NULL);
         t0 = os_clock_ms();
-        resp2 = llm_chat_stream(endpoint, api_key, model, prompt_buf, on_llm_token, NULL);
+        llm_response_t *resp2 = llm_chat_stream(endpoint, api_key, model, prompt_buf, on_llm_token, NULL);
         elapsed = os_clock_ms() - t0;
         g_spinner_on = 0;
         os_thread_join(tid);
@@ -763,6 +742,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
         if (!resp2) {
             if (out) os_snprintf(out, out_len, RED "%% LLM unavailable" RST);
             if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
+            llm_response_free(resp);
             return -1;
         }
 
@@ -778,55 +758,13 @@ int handle_ask(const char *question, char *out, size_t out_len)
             os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n");
         }
 
-        /* L5 Archive: append Phase 2 */
         if (resp2->content)
             archive_append_log(NULL, question, resp2->content);
-        /* Feed turn (Phase 2 overwrites Phase 1's turn) */
         if (resp2->content)
             archive_feed_turn(question, resp2->content);
 
-        /* Check for tool calls in Phase 2 response — BEFORE freeing */
-        phase2_resp = 0;
-        if (resp2->content && strstr(resp2->content, "[TOOL:")) {
-            const char *pp = resp2->content;
-            while (pp) {
-                const char *tool_p = strstr(pp, "[TOOL:");
-                if (!tool_p) break;
-                const char *start = tool_p + 6;
-                const char *end = strchr(start, ']');
-                if (!end) break;
-
-                char name[1024];
-                size_t clen = (size_t)(end - start);
-                size_t cp = clen < sizeof(name) - 1 ? clen : sizeof(name) - 1;
-                os_memcpy(name, start, cp);
-                name[cp] = '\0';
-
-                char tool_result[4096];
-                if (tool_dispatch(name, tool_result, sizeof(tool_result)) == 0) {
-                    size_t rlen = os_strlen(tool_result);
-                    if (rlen >= sizeof(extra_buf)) rlen = sizeof(extra_buf) - 1;
-                    os_memcpy(extra_buf, tool_result, rlen);
-                    extra_buf[rlen] = '\0';
-                    phase2_resp = 1;
-                    LOG_INFO("Tool loop: called (%zu chars)", rlen);
-                }
-                pp = end + 1;
-            }
-        }
-
-        /* Now safe to free resp2 (no more accesses) */
-        if (!phase2_resp) {
-            llm_response_free(resp2);
-            resp2 = NULL;
-            break;
-        }
-    }
-
-    /* ── End of Phase 2+ loop ──────────────────────────────────────── */
-    if (loop_count > 0) {
-        /* Print final response stats from last phase 2 response */
-        if (resp2 && out) {
+        /* Stats bar */
+        if (out) {
             size_t pos = 0;
             pos += os_snprintf(out + pos, out_len - pos, DIM "  %.1fs", (double)resp2->latency_ms / 1000.0);
             if (resp2->completion_tokens > 0) {
@@ -848,10 +786,12 @@ int handle_ask(const char *question, char *out, size_t out_len)
             }
             os_snprintf(out + pos, out_len - pos, RST);
         }
-        if (resp2) { llm_response_free(resp2); resp2 = NULL; }
+        llm_response_free(resp2);
+        llm_response_free(resp);
+        return 0;
     }
 
-    /* ── No skill — show stats for phase 1 response ─────────────────── */
+    /* ── No skill/tool — show stats for phase 1 response ────────────── */
     if (out && resp) {
         size_t pos = 0;
         pos += os_snprintf(out + pos, out_len - pos, DIM "  %.1fs", (double)resp->latency_ms / 1000.0);

@@ -159,6 +159,102 @@ int tool_count(void)
     return n;
 }
 
+int tool_get_info(int index, tool_info_t *info)
+{
+    if (!info) return -1;
+    os_mutex_lock(g_ctx->tool_mutex);
+    if (index < 0 || index >= g_ctx->tool_count) {
+        os_mutex_unlock(g_ctx->tool_mutex);
+        return -1;
+    }
+    tool_entry_t *e = &g_ctx->tools[index];
+    info->name = e->def.name;
+    info->description = e->def.description;
+    info->params_json = e->def.params_json;
+    info->risk = e->def.risk;
+    info->enabled = e->active;
+    os_mutex_unlock(g_ctx->tool_mutex);
+    return 0;
+}
+
+int tool_find(const char *name, tool_info_t *info)
+{
+    if (!name || !info) return -1;
+    os_mutex_lock(g_ctx->tool_mutex);
+    for (int i = 0; i < g_ctx->tool_count; i++) {
+        if (os_strcmp(g_ctx->tools[i].def.name, name) == 0) {
+            tool_entry_t *e = &g_ctx->tools[i];
+            info->name = e->def.name;
+            info->description = e->def.description;
+            info->params_json = e->def.params_json;
+            info->risk = e->def.risk;
+            info->enabled = e->active;
+            os_mutex_unlock(g_ctx->tool_mutex);
+            return 0;
+        }
+    }
+    os_mutex_unlock(g_ctx->tool_mutex);
+    return -1;
+}
+
+int tool_validate(const char *name, const char *args_json,
+                  char *err, size_t err_len)
+{
+    if (!name || !args_json) return -1;
+
+    /* Find tool's params_json schema */
+    tool_info_t info;
+    if (tool_find(name, &info) != 0) {
+        os_snprintf(err, err_len, "unknown tool: %s", name);
+        return -1;
+    }
+    if (!info.params_json || !*info.params_json)
+        return 0;  /* no schema = no validation */
+
+    /* Lightweight: check required fields exist in args_json */
+    /* Parse schema for "required": [...] and check each key exists in args */
+    const char *req = strstr(info.params_json, "\"required\"");
+    if (!req) return 0;  /* no required fields */
+
+    const char *arr_start = strchr(req, '[');
+    if (!arr_start) return 0;
+    arr_start++;
+
+    const char *p = arr_start;
+    while (*p && *p != ']') {
+        /* Skip whitespace and quotes */
+        while (*p == ' ' || *p == '"' || *p == ',') p++;
+        if (*p == ']') break;
+
+        /* Read field name */
+        const char *fn_start = p;
+        while (*p && *p != '"' && *p != ',' && *p != ']') p++;
+        if (p == fn_start) break;
+
+        size_t fn_len = (size_t)(p - fn_start);
+
+        /* Check if args_json contains "fieldname": */
+        /* Build search pattern: "fieldname": */
+        char search[128];
+        os_snprintf(search, sizeof(search), "\"%.*s\":", (int)fn_len, fn_start);
+
+        if (!strstr(args_json, search) &&
+            !strstr(args_json, "'") && !strstr(args_json, search)) {
+            /* Also try single-quote variant */
+            char search_sq[128];
+            os_snprintf(search_sq, sizeof(search_sq), "'%.*s':", (int)fn_len, fn_start);
+            if (!strstr(args_json, search_sq)) {
+                os_snprintf(err, err_len, "missing required argument: %.*s",
+                            (int)fn_len, fn_start);
+                return -1;
+            }
+        }
+        /* Skip past quote */
+        if (*p == '"') p++;
+    }
+    return 0;
+}
+
 /* ── Module Registration ──────────────────────────────────────────── */
 
 static int echo_execute(const char *args_json, char *result,
@@ -300,6 +396,7 @@ static int tool_manager_start(framework_module_t *mod)
         .name = "echo",
         .description = "Echo back the input arguments",
         .params_json = "{\"type\":\"object\",\"properties\":{}}",
+        .risk = TOOL_RISK_SAFE,
         .execute = echo_execute,
     };
     tool_register(&echo);
@@ -311,6 +408,7 @@ static int tool_manager_start(framework_module_t *mod)
         .params_json = "{\"type\":\"object\",\"properties\":{"
             "\"path\":{\"type\":\"string\",\"description\":\"directory path\"}"
             "}}",
+        .risk = TOOL_RISK_SAFE,
         .execute = list_dir_execute,
     };
     tool_register(&list_dir);
@@ -321,6 +419,7 @@ static int tool_manager_start(framework_module_t *mod)
         .params_json = "{\"type\":\"object\",\"properties\":{"
             "\"path\":{\"type\":\"string\",\"description\":\"file path\"}"
             "}}",
+        .risk = TOOL_RISK_SAFE,
         .execute = read_file_execute,
     };
     tool_register(&read_file);

@@ -10,19 +10,35 @@
 
 #include <stddef.h>
 
+/* Risk levels for tool permission policy */
+#define TOOL_RISK_SAFE       0  /* read-only, always allowed */
+#define TOOL_RISK_WRITE      1  /* modifies files/state */
+#define TOOL_RISK_SHELL      2  /* runs shell commands */
+#define TOOL_RISK_DANGEROUS  3  /* destructive, needs explicit confirm */
+
 /* Maximum result buffer for tool_call() */
 #define TOOL_RESULT_MAX  4096
 
-/* Tool definition */
+/* Tool definition — used when registering */
 typedef struct {
     const char *name;           /* unique tool name */
     const char *description;    /* human-readable description */
     const char *params_json;    /* JSON Schema for parameters */
+    int         risk;           /* TOOL_RISK_* */
     int (*execute)(const char *args_json,   /* JSON arguments */
                    char *result,            /* output buffer */
                    size_t result_len,       /* output buffer size */
                    void *user_data);        /* opaque context */
 } tool_def_t;
+
+/* Tool info — read-only query result (no execute callback) */
+typedef struct {
+    const char *name;
+    const char *description;
+    const char *params_json;
+    int         risk;
+    int         enabled;
+} tool_info_t;
 
 /*
  * Register a tool. Returns 0 on success, -1 if name exists or full.
@@ -40,14 +56,25 @@ int tool_register(const tool_def_t *tool);
 int tool_call(const char *name, const char *args_json,
               char *result, size_t result_len);
 
-/*
- * List all registered tools as a JSON array.
- * Format: [{"name":"x","description":"...","params":{...}}, ...]
- * Returns number of tools, or -1 on buffer overflow.
- */
-int tool_list_json(char *buf, size_t buf_len);
-
 /* Number of registered tools */
 int tool_count(void);
+
+/*
+ * Get tool info by index. Returns 0 on success, -1 if index out of range.
+ */
+int tool_get_info(int index, tool_info_t *info);
+
+/*
+ * Find tool by name. Returns 0 on success, -1 if not found.
+ */
+int tool_find(const char *name, tool_info_t *info);
+
+/*
+ * Validate tool arguments against the registered params_json schema.
+ * Lightweight checks: required fields present, non-empty strings.
+ * Returns 0 on valid, -1 on invalid (error message in err buffer).
+ */
+int tool_validate(const char *name, const char *args_json,
+                  char *err, size_t err_len);
 
 #endif /* BUSINESS_TOOL_MANAGER_H */
