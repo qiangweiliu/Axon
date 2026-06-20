@@ -13,6 +13,24 @@
 #include <stdio.h>
 #include <string.h>
 
+/* ── Tool execution spinner ─────────────────────────────────────────── */
+
+static volatile int g_tool_spinning = 0;
+
+static void *tool_spinner(void *arg)
+{
+    (void)arg;
+    const char *f[] = {"◇", "◆"};
+    int i = 0;
+    while (g_tool_spinning) {
+        os_printf("\r  \033[2m⚙ %s\033[0m", f[i]);
+        fflush(stdout);
+        i = (i + 1) & 1;
+        os_sleep_ms(200);
+    }
+    return NULL;
+}
+
 /*
  * Normalize JSON: replace single quotes with double quotes,
  * but only for JSON structural delimiters (not literal ' inside values).
@@ -263,7 +281,8 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
         /* Truncate long args for display */
         size_t slen = os_strlen(show);
         if (slen > 70) { show[67] = '.'; show[68] = '.'; show[69] = '.'; show[70] = '\0'; }
-        os_printf("\n  \033[2m⚙ %s %s\033[0m", call->name, show);
+        /* Print indicator line, spinner will animate on same line below */
+        os_printf("\n  \033[2m⚙ %s %s\033[0m\n", call->name, show);
         fflush(stdout);
     }
 
@@ -332,17 +351,26 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
         return -1;
     }
 
-    /* 4. Execute */
+    /* 4. Execute with spinner */
     char tool_output[TOOL_RESULT_MAX];
     LOG_DEBUG("ToolExec: execute_call — dispatching to tool_call()");
+
+    /* Start spinner thread (animates below the indicator line) */
+    g_tool_spinning = 1;
+    os_thread_handle_t sp_tid;
+    os_thread_create(&sp_tid, tool_spinner, NULL);
+
     int rc = tool_call(call->name, call->args_json, tool_output, sizeof(tool_output));
-    LOG_DEBUG("ToolExec: execute_call — tool_call() rc=%d, output_len=%zu",
-              rc, tool_output[0] ? os_strlen(tool_output) : 0);
-    /* Completion indicator: overwrite the "⚙ name args" line,
-     * then clear to end-of-line to erase any leftover text from the
-     * longer "before" indicator. */
+
+    /* Stop spinner and print completion */
+    g_tool_spinning = 0;
+    os_thread_join(sp_tid);
     os_printf("\r  \033[2m⚙ %s\033[0m %s\033[K\n",
               call->name, rc < 0 ? "\033[31m✗\033[0m" : "\033[32m✓\033[0m");
+    fflush(stdout);
+
+    LOG_DEBUG("ToolExec: execute_call — tool_call() rc=%d, output_len=%zu",
+              rc, tool_output[0] ? os_strlen(tool_output) : 0);
     if (rc < 0) {
         LOG_DEBUG("ToolExec: execute_call — execution failed (rc=%d)", rc);
         os_snprintf(result, result_len,
