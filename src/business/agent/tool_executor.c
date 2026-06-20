@@ -295,17 +295,15 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
     tool_info_t info;
     if (tool_find(call->name, &info) != 0) {
         LOG_DEBUG("ToolExec: execute_call — tool '%s' not found", call->name);
-        /* List available tools */
         os_snprintf(result, result_len,
             "<tool_result>\n"
             "tool: %s\n"
             "status: error\n"
-            "message: tool not found\n"
-            "available: ",
-            call->name);
-        int n = tool_count();
+            "message: tool '%s' not found. Available tools: ",
+            call->name, call->name);
         size_t pos = os_strlen(result);
-        for (int i = 0; i < n && pos < result_len - 20; i++) {
+        int n = tool_count();
+        for (int i = 0; i < n && pos < result_len - 30; i++) {
             tool_info_t ti;
             if (tool_get_info(i, &ti) != 0) continue;
             if (i > 0 && pos < result_len - 2) result[pos++] = ' ';
@@ -313,6 +311,19 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
             size_t cp = nlen < result_len - pos - 2 ? nlen : result_len - pos - 2;
             os_memcpy(result + pos, ti.name, cp);
             pos += cp;
+        }
+        /* Add hint for common LLM mistake */
+        if (os_strcmp(call->name, "ARCHIVE") == 0 ||
+            os_strcmp(call->name, "NOTE") == 0 ||
+            os_strcmp(call->name, "SKILL") == 0 ||
+            os_strcmp(call->name, "RECALL") == 0 ||
+            os_strcmp(call->name, "PROFILE") == 0 ||
+            os_strcmp(call->name, "FORGET") == 0) {
+            pos += os_snprintf(result + pos, result_len - pos,
+                "\nhint: [%s:...] is a directive (square brackets), "
+                "not a tool call. Use directives at the end of your "
+                "text reply, not inside <tool_call> blocks.",
+                call->name);
         }
         pos += os_snprintf(result + pos, result_len - pos, "\n</tool_result>\n");
         return -1;
@@ -351,6 +362,7 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
             "tool: %s\n"
             "status: error\n"
             "message: %s\n"
+            "hint: check the tool schema and ensure all required fields are present\n"
             "</tool_result>\n",
             call->name, err);
         return -1;
