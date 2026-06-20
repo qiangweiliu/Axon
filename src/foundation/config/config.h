@@ -33,6 +33,7 @@ typedef struct {
 
     /* tools: */
     int      shell_confirm;  /* 1=confirm before shell tools (default), 0=auto-run */
+    int      tool_max_depth; /* max tool call rounds (default 4) */
 } config_t;
 
 /* Returns the global parsed config. NULL before config module init. */

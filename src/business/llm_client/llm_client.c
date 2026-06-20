@@ -259,31 +259,44 @@ llm_response_t *llm_chat(const char *endpoint,
         extra = auth_hdr;
     }
 
-    http_response_t *http;
-    if (is_https) {
-        http = https_post(host, port, path, "application/json", body, extra);
-    } else {
-        http = http_post(host, port, path, "application/json", body, extra);
-    }
-    if (!http) { LOG_ERROR("LLM: HTTP request failed"); return NULL; }
+    /* Retry loop: 3 attempts with exponential backoff (1s, 2s, 4s) */
+    for (int attempt = 0; attempt < 3; attempt++) {
+        http_response_t *http;
+        if (is_https)
+            http = https_post(host, port, path, "application/json", body, extra);
+        else
+            http = http_post(host, port, path, "application/json", body, extra);
 
-    LOG_DEBUG("LLM: HTTP %d, body_len=%zu", http->status_code, http->body_len);
-    if (http->status_code != 200 || !http->body) {
-        LOG_WARN("LLM: HTTP %d (expected 200), body=%.100s",
-                 http->status_code, http->body ? http->body : "(null)");
-        http_response_free(http); return NULL;
-    }
+        if (!http) {
+            LOG_ERROR("LLM: HTTP request failed (attempt %d)", attempt + 1);
+            if (attempt < 2) { os_sleep_ms((1u << attempt) * 1000); continue; }
+            return NULL;
+        }
 
-    llm_response_t *resp = (llm_response_t *)os_calloc(1, sizeof(*resp));
-    if (!resp) { http_response_free(http); return NULL; }
-    int dummy_is_reasoning = 0;
-    resp->content = m->extract_content(http->body, &resp->content_len, &dummy_is_reasoning);
-    resp->prompt_tokens = m->extract_int(http->body, "prompt_tokens");
-    resp->completion_tokens = m->extract_int(http->body, "completion_tokens");
-    if (!resp->content) { LOG_WARN("LLM: no content"); os_free(resp); http_response_free(http); return NULL; }
-    LOG_DEBUG("LLM: response (%zu chars)", resp->content_len);
-    http_response_free(http);
-    return resp;
+        LOG_DEBUG("LLM: HTTP %d, body_len=%zu (attempt %d)",
+                  http->status_code, http->body_len, attempt + 1);
+
+        if (http->status_code != 200 || !http->body) {
+            LOG_WARN("LLM: HTTP %d (expected 200)", http->status_code);
+            http_response_free(http);
+            if (attempt < 2 && http->status_code >= 500) {
+                os_sleep_ms((1u << attempt) * 1000); continue;  /* retry on 5xx */
+            }
+            return NULL;  /* don't retry 4xx errors */
+        }
+
+        llm_response_t *resp = (llm_response_t *)os_calloc(1, sizeof(*resp));
+        if (!resp) { http_response_free(http); return NULL; }
+        int dummy_is_reasoning = 0;
+        resp->content = m->extract_content(http->body, &resp->content_len, &dummy_is_reasoning);
+        resp->prompt_tokens = m->extract_int(http->body, "prompt_tokens");
+        resp->completion_tokens = m->extract_int(http->body, "completion_tokens");
+        if (!resp->content) { LOG_WARN("LLM: no content"); os_free(resp); http_response_free(http); return NULL; }
+        LOG_DEBUG("LLM: response (%zu chars)", resp->content_len);
+        http_response_free(http);
+        return resp;
+    }
+    return NULL;
 }
 
 void llm_response_free(llm_response_t *resp)

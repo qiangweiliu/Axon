@@ -253,6 +253,9 @@ static void parse_line(char *line, void *user)
     else if (os_strcmp(st->section, "tools") == 0) {
         if (os_strcmp(key, "shell_confirm") == 0) {
             g_ctx->cfg.shell_confirm = (val[0] == 't' || val[0] == 'T' || val[0] == '1');
+        } else if (os_strcmp(key, "max_depth") == 0) {
+            int d = parse_int(val);
+            if (d >= 1 && d <= 10) g_ctx->cfg.tool_max_depth = d;
         }
     }
 }
@@ -270,6 +273,7 @@ static int parse_config(const char *path)
     g_ctx->cfg.skills_dir[0]   = '\0';
     g_ctx->cfg.debug           = 0;
     g_ctx->cfg.shell_confirm    = 1;  /* default: confirm ON (safe) */
+    g_ctx->cfg.tool_max_depth   = 4;  /* default: 4 rounds */
 
     os_file_handle_t fh = os_file_open(path, "r");
     if (!fh) {

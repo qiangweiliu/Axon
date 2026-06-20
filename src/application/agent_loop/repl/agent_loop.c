@@ -45,6 +45,18 @@ static int process_line(const char *line, char *out, size_t out_len)
         handle_forget("", out, out_len);
     } else if (os_strncmp(line, "echo ", 5) == 0) {
         handle_echo(line + 5, out, out_len);
+    } else if (os_strcmp(line, "history") == 0) {
+        os_file_handle_t fh = os_file_open("data/session.json", "r");
+        if (fh && out) {
+            char b[4096]; size_t n = os_file_read(fh, b, sizeof(b)-1);
+            os_file_close(fh);
+            if (n > 0) { b[n] = '\0'; os_snprintf(out, out_len, GRY "%s" RST, b); }
+            else { os_snprintf(out, out_len, GRY "(empty)" RST); }
+        } else if (out) { os_snprintf(out, out_len, GRY "(no history)" RST); }
+    } else if (os_strcmp(line, "stats") == 0) {
+        if (out) os_snprintf(out, out_len,
+            GRY "tok: %d | mem: %d notes + %d profile" RST,
+            g_ctx->session_tokens, g_ctx->mem.count, g_ctx->user.count);
     } else if (os_strncmp(line, "model ", 6) == 0) {
         const char *new_model = line + 6;
         while (*new_model == ' ') new_model++;

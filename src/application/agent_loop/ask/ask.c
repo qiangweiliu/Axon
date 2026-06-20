@@ -801,7 +801,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
                     char agent_answer[AGENT_MAX_RESPONSE];
                     agent_context_t actx = {
                         .base_prompt = agent_base,
-                        .max_depth = 4,
+                        .max_depth = cfg ? cfg->tool_max_depth : 4,
                         .debug = cfg ? cfg->debug : 0,
                     };
                     int rc = agent_run(endpoint, api_key, model,
@@ -860,7 +860,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
             char agent_answer[AGENT_MAX_RESPONSE];
             agent_context_t actx = {
                 .base_prompt = agent_base,
-                .max_depth = 4,
+                .max_depth = cfg ? cfg->tool_max_depth : 4,
                 .debug = cfg ? cfg->debug : 0,
             };
             int rc = agent_run(endpoint, api_key, model,

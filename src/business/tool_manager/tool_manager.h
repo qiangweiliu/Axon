@@ -17,7 +17,7 @@
 #define TOOL_RISK_DANGEROUS  3  /* destructive, needs explicit confirm */
 
 /* Maximum result buffer for tool_call() */
-#define TOOL_RESULT_MAX  4096
+#define TOOL_RESULT_MAX  8192
 
 /* Tool definition — used when registering */
 typedef struct {
