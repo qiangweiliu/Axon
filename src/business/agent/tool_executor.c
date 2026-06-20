@@ -278,9 +278,14 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
         } else {
             os_snprintf(show, sizeof(show), "%s", call->args_json);
         }
-        /* Truncate long args for display */
+        /* Truncate long args at UTF-8 boundary to avoid garbled CJK chars */
         size_t slen = os_strlen(show);
-        if (slen > 70) { show[67] = '.'; show[68] = '.'; show[69] = '.'; show[70] = '\0'; }
+        if (slen > 70) {
+            size_t cut = 67;
+            while (cut > 0 && ((unsigned char)show[cut] & 0xC0) == 0x80)
+                cut--;  /* back up past continuation bytes */
+            show[cut] = '.'; show[cut+1] = '.'; show[cut+2] = '.'; show[cut+3] = '\0';
+        }
         /* Print indicator line, spinner will animate on same line below */
         os_printf("\n  \033[2m⚙ %s %s\033[0m\n", call->name, show);
         fflush(stdout);
