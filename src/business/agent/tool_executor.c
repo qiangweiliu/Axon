@@ -7,6 +7,7 @@
 
 #include "tool_executor.h"
 #include "tool_manager.h"
+#include "config.h"
 #include "os_api.h"
 #include "agent_framework.h"
 #include <string.h>
@@ -233,10 +234,11 @@ int tool_execute_call(const tool_call_t *call, char *result, size_t result_len)
         return -1;
     }
 
-    LOG_DEBUG("ToolExec: execute_call — tool risk=%d (shell=2)", info.risk);
+    LOG_DEBUG("ToolExec: execute_call — tool risk=%d (shell=2), shell_confirm=%d",
+              info.risk, config_get() ? config_get()->shell_confirm : 1);
 
-    /* 2. Risk check — require user confirmation for shell/dangerous tools */
-    if (info.risk >= TOOL_RISK_SHELL) {
+    /* 2. Risk check — optionally require user confirmation for shell/dangerous tools */
+    if (info.risk >= TOOL_RISK_SHELL && config_get() && config_get()->shell_confirm) {
         char confirm_prompt[512];
         os_snprintf(confirm_prompt, sizeof(confirm_prompt),
                     "[!] Tool '%s' — %s\n    Args: %s\n    Execute?",

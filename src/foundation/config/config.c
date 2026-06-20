@@ -249,6 +249,12 @@ static void parse_line(char *line, void *user)
             g_ctx->cfg.debug = (val[0] == 't' || val[0] == 'T' || val[0] == '1');
         }
     }
+    /* ── tools: ── */
+    else if (os_strcmp(st->section, "tools") == 0) {
+        if (os_strcmp(key, "shell_confirm") == 0) {
+            g_ctx->cfg.shell_confirm = (val[0] == 't' || val[0] == 'T' || val[0] == '1');
+        }
+    }
 }
 
 static int parse_config(const char *path)
@@ -263,6 +269,7 @@ static int parse_config(const char *path)
     g_ctx->cfg.llm_model[0]    = '\0';
     g_ctx->cfg.skills_dir[0]   = '\0';
     g_ctx->cfg.debug           = 0;
+    g_ctx->cfg.shell_confirm    = 1;  /* default: confirm ON (safe) */
 
     os_file_handle_t fh = os_file_open(path, "r");
     if (!fh) {

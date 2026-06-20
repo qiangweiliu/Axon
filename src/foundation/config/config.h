@@ -30,6 +30,9 @@ typedef struct {
 
     /* debug: */
     int      debug;
+
+    /* tools: */
+    int      shell_confirm;  /* 1=confirm before shell tools (default), 0=auto-run */
 } config_t;
 
 /* Returns the global parsed config. NULL before config module init. */
