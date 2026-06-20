@@ -542,6 +542,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
 
     g_spinner_on = 1;
     g_ctx->first_token = 0;
+    g_ctx->saw_reasoning = 0;
     os_printf("\n");
     fflush(stdout);
     os_thread_handle_t tid;
@@ -564,8 +565,10 @@ int handle_ask(const char *question, char *out, size_t out_len)
 
     /* Streaming produced no visible tokens (SSE extraction failed,
      * API returned non-SSE format, etc.) but the non-streaming fallback
-     * in llm_chat_stream() succeeded. Display the full response now. */
-    if (!g_ctx->first_token && resp->content && resp->content[0]) {
+     * in llm_chat_stream() succeeded. Display the full response now.
+     * Skip if content is a tool call — let the tool loop handle it. */
+    if (!g_ctx->first_token && resp->content && resp->content[0]
+        && !strstr(resp->content, "<tool_call>")) {
         print_answer_top();
         os_printf("%s", resp->content);
         print_answer_bottom();
@@ -858,6 +861,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
         BUILD_PROMPT();
         g_spinner_on = 1;
         g_ctx->first_token = 0;
+        g_ctx->saw_reasoning = 0;
         os_printf("\n");
         fflush(stdout);
         os_thread_create(&tid, spinner_thread, NULL);
@@ -878,7 +882,8 @@ int handle_ask(const char *question, char *out, size_t out_len)
         if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
         if (g_ctx->saw_reasoning == 1) { print_reasoning_bottom(); os_printf("\n"); }
 
-        if (!g_ctx->first_token && resp2->content && resp2->content[0]) {
+        if (!g_ctx->first_token && resp2->content && resp2->content[0]
+            && !strstr(resp2->content, "<tool_call>")) {
             print_answer_top();
             os_printf("%s", resp2->content);
             print_answer_bottom();
