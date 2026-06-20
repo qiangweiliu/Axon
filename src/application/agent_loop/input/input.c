@@ -17,6 +17,7 @@
 #include <string.h>
 #include "ansi.h"
 #include "input.h"
+#include "os_api.h"
 
 typedef struct {
     struct termios orig_tio;
@@ -76,21 +77,86 @@ static int history_load(int offset, char *buf, int max)
     return (int)len;
 }
 
+/* ── UTF-8 visual width ──────────────────────────────────────────────── */
+
+/* Return the visual column width of the first `bytes` bytes of `s`.
+ * Terminal display rules (simplified wcwidth):
+ *   ASCII (0x00-0x7F):                   1 byte  → 1 column
+ *   CJK / East Asian wide (see below):   3 bytes → 2 columns
+ *   Other 3-byte / 2-byte:               1 column
+ *   4-byte (emoji etc):                  2 columns (rare)
+ *   Continuation bytes (0x80-0xBF):      0 width
+ *
+ * CJK wide range covers codepoints commonly used in Chinese/Japanese/Korean
+ * that terminals render as double-width: U+2E80..U+9FFF, U+F900..U+FAFF,
+ * U+FF01..U+FF60, etc.  We decode the UTF-8 codepoint and check.
+ */
+static int visual_width(const char *s, int bytes)
+{
+    int w = 0, i = 0;
+    while (i < bytes) {
+        unsigned char b0 = (unsigned char)s[i];
+        if (b0 < 0x80) {
+            i += 1; w += 1;
+        } else if (b0 < 0xC0) {
+            i += 1;                /* stray continuation byte */
+        } else if (b0 < 0xE0) {
+            i += 2; w += 1;        /* 2-byte, narrow */
+        } else if (b0 < 0xF0) {
+            /* 3-byte: decode codepoint, check if wide */
+            if (i + 2 < bytes) {
+                unsigned int cp = ((b0 & 0x0F) << 12)
+                                | (((unsigned char)s[i+1] & 0x3F) << 6)
+                                | ((unsigned char)s[i+2] & 0x3F);
+                int wide = 0;
+                if (cp >= 0x1100 && cp <= 0x115F)  wide = 1;       /* Hangul */
+                else if (cp >= 0x2E80 && cp <= 0x9FFF)  wide = 1;  /* CJK */
+                else if (cp >= 0xAC00 && cp <= 0xD7A3) wide = 1;   /* Hangul */
+                else if (cp >= 0xF900 && cp <= 0xFAFF) wide = 1;   /* CJK compat */
+                else if (cp >= 0xFF01 && cp <= 0xFF60) wide = 1;   /* fullwidth */
+                else if (cp >= 0xFFE0 && cp <= 0xFFE6) wide = 1;   /* fullwidth */
+                w += wide ? 2 : 1;
+            } else {
+                w += 1;  /* incomplete sequence at boundary */
+            }
+            i += 3;
+        } else {
+            /* 4-byte: emoji etc → 2 columns */
+            i += 4; w += 2;
+        }
+    }
+    return w;
+}
+
 /* ── Display helpers ──────────────────────────────────────────────────── */
 
 /* Redraw the full input line: \r + prompt + buffer + clear-to-EOL,
  * then move cursor back to the tracked byte position. */
 static void redraw_line(const char *buf, int len, int cursor)
 {
-    write(STDOUT_FILENO, "\r", 1);
-    write(STDOUT_FILENO, PROMPT_RAW, PROMPT_LEN);
-    write(STDOUT_FILENO, buf, (size_t)len);
-    write(STDOUT_FILENO, "\033[K", 3);
-    if (cursor < len) {
-        char move[16];
-        int n = snprintf(move, sizeof(move), "\033[%dD", len - cursor);
-        write(STDOUT_FILENO, move, (size_t)n);
+    char out[32 + PROMPT_LEN + 4096];
+    int pos = 0;
+    out[pos++] = '\r';
+    os_memcpy(out + pos, PROMPT_RAW, PROMPT_LEN); pos += PROMPT_LEN;
+    if (len > 0) {
+        os_memcpy(out + pos, buf, (size_t)len); pos += len;
     }
+    out[pos++] = '\033'; out[pos++] = '[';
+    out[pos++] = 'K';
+
+    /* Position cursor to the exact visual column corresponding to the
+     * byte cursor position.  "┃> " = 3 visual cols → text starts at col 3.
+     * After cursor bytes, we are at col (3 + visual_width).  CHA is 1-based
+     * so we emit \033[<3 + 1 + v_curs>G = \033[<4 + v_curs>G. */
+    if (cursor < len || cursor == len) {
+        int v_curs = visual_width(buf, cursor);
+        int col = 4 + v_curs;   /* 1-based CHA column */
+        out[pos++] = '\033'; out[pos++] = '[';
+        if (col >= 10) { out[pos++] = (char)('0' + col / 10); }
+        out[pos++] = (char)('0' + col % 10);
+        out[pos++] = 'G';
+    }
+    write(STDOUT_FILENO, out, (size_t)pos);
 }
 
 /* ── Raw mode ──────────────────────────────────────────────────────────── */
@@ -121,8 +187,7 @@ static void on_escape(char seq1, char seq2,
                       char *buf, int *len, int *cursor, int max)
 {
     if (seq1 == '[' || seq1 == 'O') {
-        /* Arrow keys send ESC [ A/B/C/D  (or ESC O A/B/C/D on some terminals) */
-        int ch = seq2;  /* A=up, B=down, C=right, D=left */
+        int ch = seq2;
 
         switch (ch) {
         /* ── Up ── */
@@ -165,10 +230,10 @@ static void on_escape(char seq1, char seq2,
         /* ── Right ── */
         case 'C':
             if (*cursor < *len) {
-                /* Don't break in the middle of a multi-byte UTF-8 char */
-                if ((buf[*cursor] & 0xC0) == 0x80)
-                    return;
                 (*cursor)++;
+                /* Skip continuation bytes to land on a character start */
+                while (*cursor < *len && ((unsigned char)buf[*cursor] & 0xC0) == 0x80)
+                    (*cursor)++;
                 redraw_line(buf, *len, *cursor);
             }
             return;
@@ -176,10 +241,10 @@ static void on_escape(char seq1, char seq2,
         /* ── Left ── */
         case 'D':
             if (*cursor > 0) {
-                /* Don't break in the middle of a multi-byte UTF-8 char */
-                if ((buf[*cursor - 1] & 0xC0) == 0x80)
-                    return;
                 (*cursor)--;
+                /* Skip continuation bytes to land on a character start */
+                while (*cursor > 0 && ((unsigned char)buf[*cursor] & 0xC0) == 0x80)
+                    (*cursor)--;
                 redraw_line(buf, *len, *cursor);
             }
             return;
