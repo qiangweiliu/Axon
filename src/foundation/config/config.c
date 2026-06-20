@@ -231,6 +231,21 @@ static void parse_line(char *line, void *user)
             }
         }
     }
+    /* ── skills: ── */
+    else if (os_strcmp(st->section, "skills") == 0) {
+        if (os_strcmp(key, "dir") == 0) {
+            size_t vlen = os_strlen(val);
+            if (vlen < sizeof(g_ctx->cfg.skills_dir)) {
+                os_memcpy(g_ctx->cfg.skills_dir, val, vlen + 1);
+            }
+        }
+    }
+    /* ── debug: ── */
+    else if (os_strcmp(st->section, "debug") == 0) {
+        if (os_strcmp(key, "enabled") == 0) {
+            g_ctx->cfg.debug = (val[0] == 't' || val[0] == 'T' || val[0] == '1');
+        }
+    }
 }
 
 static int parse_config(const char *path)
@@ -243,6 +258,8 @@ static int parse_config(const char *path)
     g_ctx->cfg.llm_endpoint[0] = '\0';
     g_ctx->cfg.llm_api_key[0]  = '\0';
     g_ctx->cfg.llm_model[0]    = '\0';
+    g_ctx->cfg.skills_dir[0]   = '\0';
+    g_ctx->cfg.debug           = 0;
 
     os_file_handle_t fh = os_file_open(path, "r");
     if (!fh) {
@@ -360,6 +377,15 @@ int config_set(const char *key, const char *value)
             size_t vlen = os_strlen(value);
             if (vlen < sizeof(cfg.llm_model)) os_memcpy(cfg.llm_model, value, vlen + 1);
         }
+    } else if (os_strcmp(section, "skills") == 0) {
+        if (os_strcmp(subkey, "dir") == 0) {
+            size_t vlen = os_strlen(value);
+            if (vlen < sizeof(cfg.skills_dir)) os_memcpy(cfg.skills_dir, value, vlen + 1);
+        }
+    } else if (os_strcmp(section, "debug") == 0) {
+        if (os_strcmp(subkey, "enabled") == 0) {
+            cfg.debug = (value[0] == 't' || value[0] == 'T' || value[0] == '1');
+        }
     }
 
     /* Write config.yml from template */
@@ -402,6 +428,15 @@ int config_set(const char *key, const char *value)
                     cfg.llm_model[0] ? cfg.llm_model : "gpt-4");
     os_file_write(out, line, (size_t)n);
 
+    os_file_write(out, "\nskills:\n", 9);
+    n = os_snprintf(line, sizeof(line), "  dir: \"%s\"\n",
+                    cfg.skills_dir[0] ? cfg.skills_dir : "data/skills");
+    os_file_write(out, line, (size_t)n);
+
+    os_file_write(out, "\ndebug:\n", 7);
+    n = os_snprintf(line, sizeof(line), "  enabled: %s\n", cfg.debug ? "true" : "false");
+    os_file_write(out, line, (size_t)n);
+
     os_file_close(out);
     return 0;
 }
@@ -419,6 +454,9 @@ void config_show(void)
               g_ctx->cfg.llm_api_key[0] ? "***" : "(unset)");
     os_printf("  llm.model    = %s\n",
               g_ctx->cfg.llm_model[0] ? g_ctx->cfg.llm_model : "(unset)");
+    os_printf("  skills.dir   = %s\n",
+              g_ctx->cfg.skills_dir[0] ? g_ctx->cfg.skills_dir : "data/skills (default)");
+    os_printf("  debug        = %s\n", g_ctx->cfg.debug ? "true" : "false");
 }
 
 /* ── Module Registration ──────────────────────────────────────────── */

@@ -20,6 +20,7 @@
 #include "ask.h"
 #include "handlers.h"
 #include "config.h"
+#include "archive.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -61,36 +62,36 @@ static int process_line(const char *line, char *out, size_t out_len)
             "    from the configured model (deepseek-v4-flash).\n"
             "    Example: " CYN "ask 今天天气怎么样？" RST "\n"
             "\n"
-            "  " CYN "note" RST " <text>\n"
-            "    Save a fact to persistent memory (MEMORY.md).\n"
-            "    Memory is loaded at startup and injected into every\n"
-            "    LLM prompt as context. Limits: 2200 chars total.\n"
-            "    Example: " CYN "note 用户喜欢简洁的回答" RST "\n"
-            "\n"
-            "  " CYN "profile" RST " <text>\n"
-            "    Save user profile information (USER.md).\n"
-            "    Same mechanism as note, but for user-specific data.\n"
-            "    Limits: 1375 chars total.\n"
-            "    Example: " CYN "profile Name is 老板鱼饭" RST "\n"
-            "\n"
-            "  " CYN "notes" RST "\n"
-            "    List all entries in both MEMORY.md and USER.md\n"
-            "    with current usage percentage.\n"
-            "    Example: " CYN "notes" RST "\n"
-            "\n"
-            "  " CYN "replace" RST " <key> <new text>\n"
-            "    Find the first memory entry containing <key> and\n"
-            "    replace its entire content with <new text>.\n"
-            "    Only operates on MEMORY.md (use forget+profile for\n"
-            "    USER.md edits).\n"
-            "    Example: " CYN "replace 简洁 用户偏好详细的回答" RST "\n"
-            "\n"
-            "  " CYN "forget" RST " [-m|-u] <substring>\n"
-            "    Remove entries containing <substring> from memory.\n"
-            "    With no flag, removes from both MEMORY.md and USER.md.\n"
-            "    Use -m to target MEMORY.md only, -u for USER.md only.\n"
-            "    Example: " CYN "forget -m 测试" RST "\n"
-            "    Example: " CYN "forget 测试          (removes from both)" RST "\n"
+            "  " CYN "note" RST " <text>\n" \
+            "    Save a fact to persistent memory (L0 working.md).\n" \
+            "    Memory is loaded at startup and injected into every\n" \
+            "    LLM prompt as context. Limits: 2200 chars total.\n" \
+            "    Example: note 用户喜欢简洁的回答\n" \
+            "\n" \
+            "  " CYN "profile" RST " <text>\n" \
+            "    Save user profile information (L0 profile.md).\n" \
+            "    Same mechanism as note, but for user-specific data.\n" \
+            "    Limits: 1375 chars total.\n" \
+            "    Example: profile Name is 老板鱼饭\n" \
+            "\n" \
+            "  notes\n" \
+            "    List all entries in both L0 working.md and profile.md\n" \
+            "    with current usage percentage.\n" \
+            "    Example: notes\n" \
+            "\n" \
+            "  replace <key> <new text>\n" \
+            "    Find the first memory entry containing <key> and\n" \
+            "    replace its entire content with <new text>.\n" \
+            "    Only operates on working.md (use forget+profile for\n" \
+            "    profile.md edits).\n" \
+            "    Example: replace 简洁 用户偏好详细的回答\n" \
+            "\n" \
+            "  forget [-m|-u] <substring>\n" \
+            "    Remove entries containing <substring> from memory.\n" \
+            "    With no flag, removes from both working.md and profile.md.\n" \
+            "    Use -m to target working.md only, -u for profile.md only.\n" \
+            "    Example: forget -m 测试\n" \
+            "    Example: forget 测试          (removes from both)\n"
             "\n"
             "  " CYN "echo" RST " <message>\n"
             "    Call the built-in echo tool. Returns the message\n"
@@ -111,13 +112,24 @@ static int process_line(const char *line, char *out, size_t out_len)
             "  " GRY "help" RST "\n"
             "    Show this detailed help with examples.\n"
             "\n"
-            "  " GRY "exit" RST "  /  " GRY "quit" RST "\n"
-            "    Exit the REPL and shutdown.\n"
-            "    Example: " CYN "exit" RST "");
+            "  " GRY "exit" RST "  /  " GRY "quit" RST "\n" \
+            "    Exit the REPL and shutdown.\n" \
+            "    Example: " CYN "exit" RST "\n" \
+            "\n" \
+            "  " CYN "clear" RST "\n" \
+            "    Clear ALL memories (L0-L5). Irreversible.\n" \
+            "    Wipes topics, events, archive logs, and memory.db.\n" \
+            "    Example: " CYN "clear" RST "");
     } else if (os_strcmp(line, "exit") == 0 ||
                os_strcmp(line, "quit") == 0) {
+        /* Flush remaining conversation segment */
+        archive_flush_segment(ARC_IMP_MEDIUM);
         if (out) os_snprintf(out, out_len, "bye");
         return 1;
+    } else if (os_strcmp(line, "clear") == 0 ||
+               os_strcmp(line, "memory clear") == 0) {
+        archive_clear_all();
+        if (out) os_snprintf(out, out_len, GRN "✓ All memory cleared" RST);
     } else {
         return handle_ask(line, out, out_len);
     }
@@ -157,8 +169,8 @@ void agent_loop_repl(void)
                         ? cfg->llm_endpoint : "(unset)";
 
     /* Load persistent memory files */
-    memfile_load("memories/memory.md", &g_ctx->mem, MEMFILE_MEMORY_LIMIT);
-    memfile_load("memories/user.md",   &g_ctx->user, MEMFILE_USER_LIMIT);
+    memfile_load("data/memory/l0/working.md", &g_ctx->mem, MEMFILE_MEMORY_LIMIT);
+    memfile_load("data/memory/l0/profile.md",   &g_ctx->user, MEMFILE_USER_LIMIT);
     g_ctx->session_tokens = 0;
 
     char mu[64], uu[64];
@@ -227,8 +239,8 @@ static int agent_loop_init(framework_module_t *mod)
     g_ctx->tick_count = 0;
 
     /* Load persistent memory files */
-    memfile_load("memories/memory.md", &g_ctx->mem, MEMFILE_MEMORY_LIMIT);
-    memfile_load("memories/user.md",   &g_ctx->user, MEMFILE_USER_LIMIT);
+    memfile_load("data/memory/l0/working.md", &g_ctx->mem, MEMFILE_MEMORY_LIMIT);
+    memfile_load("data/memory/l0/profile.md",   &g_ctx->user, MEMFILE_USER_LIMIT);
     g_ctx->session_tokens = 0;
 
     os_file_handle_t fh = os_file_open(g_ctx->prompt_path, "a");

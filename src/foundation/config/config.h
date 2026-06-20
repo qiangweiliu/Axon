@@ -23,6 +23,12 @@ typedef struct {
     char     llm_endpoint[256];
     char     llm_api_key[256];
     char     llm_model[128];
+
+    /* skills: */
+    char     skills_dir[256];
+
+    /* debug: */
+    int      debug;
 } config_t;
 
 /* Returns the global parsed config. NULL before config module init. */

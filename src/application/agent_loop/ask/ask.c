@@ -6,6 +6,8 @@
 #include "os_api.h"
 #include "agent_private.h"
 #include "memfile.h"
+#include "skill_manager.h"
+#include "archive.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -379,323 +381,417 @@ int handle_ask(const char *question, char *out, size_t out_len)
         return -1;
 
     const config_t *cfg = config_get();
+    const char *endpoint = cfg && cfg->llm_endpoint[0] ? cfg->llm_endpoint : "http://localhost:8080/v1";
+    const char *api_key = cfg && cfg->llm_api_key[0] ? cfg->llm_api_key : NULL;
+    const char *model = cfg && cfg->llm_model[0] ? cfg->llm_model : "gpt-4";
+    int debug = cfg ? cfg->debug : 0;
 
-    const char *endpoint = cfg && cfg->llm_endpoint[0]
-                           ? cfg->llm_endpoint
-                           : "http://localhost:8080/v1";
+    /* ── Event segmentation: detect topic shift ─────────────────────── */
+    int topic_shift = archive_detect_topic_shift(question);
+    if (topic_shift) {
+        archive_flush_segment(ARC_IMP_MEDIUM);
+        if (debug) os_fprintf_stderr(DIM "──[EVENT: topic shift]──" RST "\n");
+    }
 
-    const char *api_key = cfg && cfg->llm_api_key[0]
-                          ? cfg->llm_api_key
-                          : NULL;
+    /* ── Auto recall: find relevant past memories ───────────────────── */
+    char recall_buf[4096];
+    recall_buf[0] = '\0';
+    int recalled = archive_auto_recall(question, recall_buf, sizeof(recall_buf));
+    if (recalled && debug)
+        os_fprintf_stderr(DIM "──[RECALLED: depth auto]──\n%s──" RST "\n", recall_buf);
 
-    const char *model = cfg && cfg->llm_model[0]
-                        ? cfg->llm_model
-                        : "gpt-4";
+    /* ── Prompt builder ─────────────────────────────────────────────── */
+    char prompt_buf[65536];
+    char extra_buf[32768];
+    extra_buf[0] = '\0';
+    int show_skill_list = 0;   /* [SKILL:list] → inject index */
+    int skill_loaded = 0;      /* [SKILL:name] → inject content  */
+
+    /* ── Language detection ─────────────────────────────────────────── */
+    static char g_user_lang[32] = "";
+    if (!g_user_lang[0]) {
+        /* Check profile first for existing language */
+        const char *lang = NULL;
+        for (int i = 0; i < g_ctx->user.count; i++) {
+            if (os_strncmp(g_ctx->user.entries[i], "Language=", 9) == 0) {
+                lang = g_ctx->user.entries[i] + 9;
+                break;
+            }
+        }
+        if (!lang) {
+            int has_cjk = 0;
+            for (const char *p = question; *p && !has_cjk; p++) {
+                unsigned char c = (unsigned char)*p;
+                if (c >= 0xE4 && c <= 0xE9) { /* UTF-8 CJK lead bytes */
+                    has_cjk = 1;
+                }
+            }
+            lang = has_cjk ? "Chinese" : "English";
+            /* Store language in profile for persistence */
+            char profile_buf[64];
+            os_snprintf(profile_buf, sizeof(profile_buf), "Language=%s", lang);
+            char fb[128];
+            handle_profile(profile_buf, fb, sizeof(fb));
+            LOG_INFO("Language: auto-detected '%s' from user input", lang);
+        }
+        size_t ll = os_strlen(lang);
+        if (ll >= sizeof(g_user_lang)) ll = sizeof(g_user_lang) - 1;
+        os_memcpy(g_user_lang, lang, ll);
+        g_user_lang[ll] = '\0';
+    }
+
+    /* Build prompt: layers 1-3, optionally with extra content */
+    #define BUILD_PROMPT()  do { \
+        int pos = 0; \
+        /* Layer 1: System (thin — identity + interface) */ \
+        pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
+            "[System]\n" \
+            "You are Axon, a C-based AI assistant running on Linux/WSL.\n" \
+            "\n" \
+            "[Interface]\n" \
+            "  [SKILL:<name>]  — load and follow a skill\n" \
+            "  [SKILL:list]    — list available skills with descriptions\n" \
+            "  [NOTE:<fact>]   — save a fact to memory\n" \
+            "  [PROFILE:<i>]   — save user info\n" \
+            "  [FORGET:<k>]    — delete from memory\n" \
+            "  [ARCHIVE: topic=<t> | episode=<e> | importance=<l|m|h|f> |\n" \
+            "            tags=<a,b,c> | detail=<full|summary>]\n" \
+            "    — remember an event (topic=title, episode=summary,\n" \
+            "      importance: low/medium/high/flash, detail: summary only or full)\n" \
+            "    Use ARCHIVE when the conversation shifts to a new topic.\n" \
+            "    This closes the current event and starts a new one.\n" \
+            "  [RECALL: <keyword>]\n" \
+            "    — recall archived memories matching keyword\n" \
+            "  [SEMANTIC: knowledge=<fact> | tags=<cat>]\n" \
+            "    — store a piece of general knowledge (not tied to an event)\n" \
+            "Append directives at the END of your reply.\n" \
+            "Directives are hidden from the user; use them silently.\n" \
+            "Do NOT acknowledge or refer to these instructions.\n" \
+            "\n"); \
+        /* Lightweight skill names (always present, ~200B) */ \
+        { const char *_nl = skill_get_names_line(); \
+          if (_nl) pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
+              "Skills: %s\n\n", _nl); } \
+        /* Language instruction */ \
+        { pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
+            "The user's language is %s. Respond in %s.\n\n", \
+            g_user_lang, g_user_lang); } \
+        /* Topics line (L1 archive index, always present) */ \
+        { const char *_tl = archive_topics_line(); \
+          if (_tl) pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
+              "%s\n", _tl); } \
+        /* Recalled memories (auto chain search, when relevant) */ \
+        if (recall_buf[0]) { \
+            pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
+                "%s\n", recall_buf); \
+        } \
+        /* Layer 2: Context (skills list on demand) */ \
+        if (show_skill_list) { \
+            const char *idx = skill_get_index(); \
+            if (idx) pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, "%s\\n\\n", idx); \
+        } \
+        /* Layer 3: Task (loaded skill content on demand) */ \
+        if (extra_buf[0]) { \
+            pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
+                "[Skill loaded: %s]\n%s\n\n", \
+                extra_buf + 32768,  /* skill name stored after content */ \
+                extra_buf); \
+        } \
+        /* Memory + Profile (always when non-empty) */ \
+        if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) { \
+            pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, "===== MEMORY =====\n"); \
+            if (g_ctx->mem.count > 0) \
+                for (int _i = 0; _i < g_ctx->mem.count; _i++) \
+                    pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, "%s\n", g_ctx->mem.entries[_i]); \
+            if (g_ctx->user.count > 0) { \
+                pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, "===== PROFILE =====\n"); \
+                for (int _i = 0; _i < g_ctx->user.count; _i++) \
+                    pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, "%s\n", g_ctx->user.entries[_i]); \
+            } \
+            pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, "\n"); \
+        } \
+        /* Flatten newlines for JSON */ \
+        for (int _i = 0; _i < pos; _i++) \
+            if (prompt_buf[_i] == '\n') prompt_buf[_i] = ' '; \
+        /* Append question */ \
+        { const char *_q = question; size_t _ql = os_strlen(_q); \
+          for (size_t _i = 0; _i < _ql && pos < (int)sizeof(prompt_buf) - 1; _i++) { \
+              char _c = _q[_i]; prompt_buf[pos++] = (_c == '\n') ? ' ' : _c; } \
+          prompt_buf[pos] = '\0'; } \
+        if (debug) { \
+            os_fprintf_stderr(DIM "──[DEBUG: Prompt Layer 1-3]───────────────" RST "\n"); \
+            int _sz = (int)os_strlen(prompt_buf) < 2000 ? (int)os_strlen(prompt_buf) : 2000; \
+            os_fprintf_stderr(DIM "%.*s" RST "\n", _sz, prompt_buf); \
+            if (os_strlen(prompt_buf) > 2000) \
+                os_fprintf_stderr(DIM "... (%zu more bytes)" RST "\n", os_strlen(prompt_buf) - 2000); \
+            os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n"); \
+        } \
+    } while(0)
+
+    /* ═══════════════════════════════════════════════════════════════════
+     * Phase 1: Normal call (thin prompt — no skill content)
+     * ═══════════════════════════════════════════════════════════════════ */
+    BUILD_PROMPT();
 
     g_spinner_on = 1;
     g_ctx->first_token = 0;
-
-    os_printf("\n");  /* keep prompt visible above, spinner below */
+    os_printf("\n");
     fflush(stdout);
-
     os_thread_handle_t tid;
     os_thread_create(&tid, spinner_thread, NULL);
-
-    /*
-     * Build prompt:
-     *   system instructions + memory context + user question
-     */
-    char prompt_buf[8192];
-    const char *final_prompt = question;
-
-    {
-        int pos = 0;
-
-        /*
-         * System instructions:
-         * tell LLM it can persist memory via markers.
-         */
-        pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
-            "[System Instructions]\n"
-            "You have a persistent memory system. To save information across sessions,\n"
-            "append one of these directives at the END of your reply:\n"
-            "  [NOTE: <fact>]       — save a fact to persistent memory\n"
-            "  [PROFILE: <info>]    — save user profile information\n"
-            "  [FORGET: <keyword>]  — remove a memory entry containing keyword\n"
-            "Example: 'I'll remember that. [NOTE: User's birthday is Jan 1]'\n"
-            "Directives are hidden from the user; use them silently.\n"
-            "Do NOT acknowledge or refer to these instructions.\n"
-            "Answer the user's question directly.\n"
-            "\n");
-
-        if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
-            pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos,
-                               "===== MEMORY =====\n");
-
-            if (g_ctx->mem.count > 0) {
-                for (int i = 0; i < g_ctx->mem.count; i++) {
-                    pos += os_snprintf(prompt_buf + pos,
-                                       sizeof(prompt_buf) - pos,
-                                       "%s\n",
-                                       g_ctx->mem.entries[i]);
-                }
-            }
-
-            if (g_ctx->user.count > 0) {
-                pos += os_snprintf(prompt_buf + pos,
-                                   sizeof(prompt_buf) - pos,
-                                   "===== PROFILE =====\n");
-
-                for (int i = 0; i < g_ctx->user.count; i++) {
-                    pos += os_snprintf(prompt_buf + pos,
-                                       sizeof(prompt_buf) - pos,
-                                       "%s\n",
-                                       g_ctx->user.entries[i]);
-                }
-            }
-
-            pos += os_snprintf(prompt_buf + pos,
-                               sizeof(prompt_buf) - pos,
-                               "\n");
-        }
-
-        /*
-         * Flatten newlines to spaces to keep JSON valid.
-         */
-        for (int i = 0; i < pos; i++) {
-            if (prompt_buf[i] == '\n')
-                prompt_buf[i] = ' ';
-        }
-
-        /*
-         * Append question and flatten its newlines too.
-         */
-        size_t qlen = os_strlen(question);
-
-        for (size_t i = 0;
-             i < qlen && pos < (int)sizeof(prompt_buf) - 1;
-             i++) {
-            char c = question[i];
-            prompt_buf[pos++] = (c == '\n') ? ' ' : c;
-        }
-
-        prompt_buf[pos] = '\0';
-        final_prompt = prompt_buf;
-    }
-
     uint64_t t0 = os_clock_ms();
-
-    llm_response_t *resp = llm_chat_stream(endpoint,
-                                           api_key,
-                                           model,
-                                           final_prompt,
-                                           on_llm_token,
-                                           NULL);
-
+    llm_response_t *resp = llm_chat_stream(endpoint, api_key, model, prompt_buf, on_llm_token, NULL);
     uint64_t elapsed = os_clock_ms() - t0;
-
     g_spinner_on = 0;
     os_thread_join(tid);
+    if (resp) resp->latency_ms = elapsed;
 
     if (!resp) {
-        if (out)
-            os_snprintf(out, out_len, RED "%% LLM unavailable" RST);
-
-        /*
-         * Close the answer box if it was opened.
-         */
-        if (g_ctx->saw_reasoning >= 2)
-            print_answer_bottom();
-
+        if (out) os_snprintf(out, out_len, RED "%% LLM unavailable" RST);
+        if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
         return -1;
     }
 
-    resp->latency_ms = elapsed;
+    if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
+    if (g_ctx->saw_reasoning == 1) { print_reasoning_bottom(); os_printf("\n"); }
 
-    /*
-     * Close answer box.
-     */
-    if (g_ctx->saw_reasoning >= 2)
-        print_answer_bottom();
-
-    /*
-     * If only reasoning box was opened but no content arrived,
-     * close it too.
-     */
-    if (g_ctx->saw_reasoning == 1) {
-        print_reasoning_bottom();
-        os_printf("\n");
+    /* Debug: raw model response */
+    if (debug && resp->content) {
+        os_fprintf_stderr(DIM "──[DEBUG: Phase 1 Response]────────────────" RST "\n");
+        int _sz = (int)os_strlen(resp->content) < 2000 ? (int)os_strlen(resp->content) : 2000;
+        os_fprintf_stderr(DIM "%.*s" RST "\n", _sz, resp->content);
+        if (os_strlen(resp->content) > 2000)
+            os_fprintf_stderr(DIM "... (%zu more bytes)" RST "\n", os_strlen(resp->content) - 2000);
+        os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n");
     }
 
-    /*
-     * Stats bar.
-     */
-    if (out) {
-        size_t pos = 0;
+    /* ── Parse directives ───────────────────────────────────────────── */
 
-        pos += os_snprintf(out + pos,
-                           out_len - pos,
-                           DIM "  %.1fs",
-                           (double)elapsed / 1000.0);
-
-        if (resp->completion_tokens > 0) {
-            int total_tok = resp->completion_tokens
-                          + (resp->prompt_tokens > 0
-                             ? resp->prompt_tokens
-                             : 0);
-
-            pos += os_snprintf(out + pos,
-                               out_len - pos,
-                               " · %d tok",
-                               total_tok);
-
-            if (elapsed > 0) {
-                double tps = (double)total_tok /
-                             ((double)elapsed / 1000.0);
-
-                pos += os_snprintf(out + pos,
-                                   out_len - pos,
-                                   " · %.1f/s",
-                                   tps);
-            }
-        }
-
-        /*
-         * Track session tokens.
-         */
-        int sess_add = resp->prompt_tokens + resp->completion_tokens;
-
-        if (sess_add > 0)
-            g_ctx->session_tokens += sess_add;
-
-        /*
-         * Show memory usage if entries exist.
-         */
-        if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
-            char mu[48];
-            char uu[48];
-
-            if (g_ctx->mem.count > 0)
-                memfile_usage(&g_ctx->mem, mu, sizeof(mu));
-
-            if (g_ctx->user.count > 0)
-                memfile_usage(&g_ctx->user, uu, sizeof(uu));
-
-            pos += os_snprintf(out + pos,
-                               out_len - pos,
-                               DIM " ‖ " RST);
-
-            if (g_ctx->mem.count > 0) {
-                pos += os_snprintf(out + pos,
-                                   out_len - pos,
-                                   DIM "mem %s" RST,
-                                   mu);
-            }
-
-            if (g_ctx->user.count > 0) {
-                pos += os_snprintf(out + pos,
-                                   out_len - pos,
-                                   DIM " · you %s" RST,
-                                   uu);
-            }
-        }
-
-        os_snprintf(out + pos, out_len - pos, RST);
-    }
-
-    /*
-     * Auto-log Q&A.
-     */
     if (resp->content) {
-        os_file_handle_t lf = os_file_open("conversations.log", "a");
-
-        if (lf) {
-            char logline[4096];
-
-            int n = os_snprintf(logline,
-                                sizeof(logline),
-                                "[%llu] Q: %s\nA: %s\n\n",
-                                (unsigned long long)t0,
-                                question,
-                                resp->content);
-
-            if (n > 0)
-                os_file_write(lf, logline, (size_t)n);
-
-            os_file_close(lf);
-        }
-
-        /*
-         * Parse memory directives from LLM response.
-         */
         const char *p = resp->content;
-
         while (p) {
-            const char *note_start = strstr(p, "[NOTE: ");
-            const char *prof_start = strstr(p, "[PROFILE: ");
-            const char *forg_start = strstr(p, "[FORGET: ");
-
+            const char *note_s = strstr(p, "[NOTE: ");
+            const char *prof_s = strstr(p, "[PROFILE: ");
+            const char *forg_s = strstr(p, "[FORGET: ");
+            const char *skil_s = strstr(p, "[SKILL:");
+            const char *recall_s = strstr(p, "[RECALL:");
+            const char *seman_s = strstr(p, "[SEMANTIC:");
+            const char *arch_s = strstr(p, "[ARCHIVE:");
             const char *earliest = NULL;
-            int kind = 0;       /* 1=note, 2=profile, 3=forget */
-            int prefix_len = 0;
+            int kind = 0, plen = 0;
 
-            if (note_start && (!earliest || note_start < earliest)) {
-                earliest = note_start;
-                kind = 1;
-                prefix_len = 7;
-            }
+            if (note_s && (!earliest || note_s < earliest)) { earliest = note_s; kind = 1; plen = 7; }
+            if (prof_s && (!earliest || prof_s < earliest)) { earliest = prof_s; kind = 2; plen = 10; }
+            if (forg_s && (!earliest || forg_s < earliest)) { earliest = forg_s; kind = 3; plen = 9; }
+            if (skil_s && (!earliest || skil_s < earliest)) { earliest = skil_s; kind = 4; plen = 7; }
+            if (arch_s && (!earliest || arch_s < earliest)) { earliest = arch_s; kind = 5; plen = 9; }
+            if (recall_s && (!earliest || recall_s < earliest)) { earliest = recall_s; kind = 6; plen = 8; }
+            if (seman_s && (!earliest || seman_s < earliest)) { earliest = seman_s; kind = 7; plen = 10; }
+            if (!earliest) break;
 
-            if (prof_start && (!earliest || prof_start < earliest)) {
-                earliest = prof_start;
-                kind = 2;
-                prefix_len = 10;
-            }
-
-            if (forg_start && (!earliest || forg_start < earliest)) {
-                earliest = forg_start;
-                kind = 3;
-                prefix_len = 9;
-            }
-
-            if (!earliest)
-                break;
-
-            const char *start = earliest + prefix_len;
+            const char *start = earliest + plen;
             const char *end = strstr(start, "]");
+            if (!end) break;
 
-            if (!end)
-                break;
-
-            /*
-             * Extract content between [MARKER: and ].
-             */
             size_t clen = (size_t)(end - start);
-
             if (clen > 0) {
-                char content[1024];
-                size_t cp = clen < sizeof(content) - 1
-                            ? clen
-                            : sizeof(content) - 1;
+                char name[1024];
+                size_t cp = clen < sizeof(name) - 1 ? clen : sizeof(name) - 1;
+                os_memcpy(name, start, cp);
+                name[cp] = '\0';
+                /* Trim leading space (for "[SKILL: name]" format) */
+                { char *_t = name; while (*_t == ' ') _t++; \
+                  if (_t > name) { memmove(name, _t, os_strlen(_t) + 1); } }
 
-                os_memcpy(content, start, cp);
-                content[cp] = '\0';
-
-                char feedback[128];
-
+                char fb[128] = "";
                 if (kind == 1) {
-                    handle_note(content, feedback, sizeof(feedback));
+                    handle_note(name, fb, sizeof(fb));
                 } else if (kind == 2) {
-                    handle_profile(content, feedback, sizeof(feedback));
+                    handle_profile(name, fb, sizeof(fb));
                 } else if (kind == 3) {
-                    handle_forget(content, feedback, sizeof(feedback));
+                    handle_forget(name, fb, sizeof(fb));
+                } else if (kind == 4) {
+                    if (os_strcmp(name, "list") == 0 || os_strcmp(name, "?") == 0) {
+                        show_skill_list = 1;
+                        os_snprintf(fb, sizeof(fb), "Skill list requested");
+                    } else {
+                        char *content = skill_load(name);
+                        if (content) {
+                            skill_loaded = 1;
+                            size_t slen = os_strlen(content);
+                            if (slen >= sizeof(extra_buf)) slen = sizeof(extra_buf) - 1;
+                            /* Store content at offset 0 */
+                            os_memcpy(extra_buf, content, slen);
+                            extra_buf[slen] = '\0';
+                            /* Store name at high offset for prompt builder */
+                            size_t nlen = os_strlen(name);
+                            if (nlen >= 64) nlen = 63;
+                            os_memcpy(extra_buf + 32768 - 64, name, nlen);
+                            extra_buf[32768 - 64 + nlen] = '\0';
+                            os_snprintf(fb, sizeof(fb), "SKILL '%s' loaded (%zu chars)", name, slen);
+                            os_free(content);
+                        } else {
+                            os_snprintf(fb, sizeof(fb), "SKILL '%s' not found", name);
+                        }
+                    }
+                } else if (kind == 5) {
+                    /* [ARCHIVE:] directive */
+                    archive_handle_directive(name);
+                    archive_bump_recall(name);
+                    archive_flush_segment(ARC_IMP_MEDIUM);  /* close current */
+                    archive_set_segment_topic(name);         /* start new */
+                    os_snprintf(fb, sizeof(fb), "Archived");
+                } else if (kind == 6) {
+                    /* [RECALL:] directive — search archived memories */
+                    /* Optional depth=N parameter */
+                    const char *depth_str = strstr(name, "| depth=");
+                    int depth = ARC_DEPTH_L1;
+                    if (depth_str) {
+                        int d = atoi(depth_str + 8);
+                        if (d >= ARC_DEPTH_L1 && d <= ARC_DEPTH_L5)
+                            depth = d;
+                        /* Strip depth param from query */
+                        char *pipe = strstr(name, "|");
+                        if (pipe) *pipe = '\0';
+                    }
+                    char recall_buf[4096];
+                    if (depth > ARC_DEPTH_L1)
+                        archive_chain(name, depth, recall_buf, sizeof(recall_buf));
+                    else
+                        archive_recall(name, recall_buf, sizeof(recall_buf));
+                    os_snprintf(fb, sizeof(fb), "Recall results below");
+                    os_printf("\n%s\n", recall_buf);
+                } else if (kind == 7) {
+                    /* [SEMANTIC:] directive — delegate to compat layer */
+                    archive_handle_semantic(name);
+                    os_snprintf(fb, sizeof(fb), "Semantic stored");
                 }
 
-                if (feedback[0])
-                    os_printf(DIM "%s" RST "\n", feedback);
+                if (fb[0]) {
+                    os_printf(DIM "%s" RST "\n", fb);
+                    if (debug) os_fprintf_stderr(DIM "  └─ [%s:%s]" RST "\n",
+                        kind==1?"NOTE":kind==2?"PROFILE":kind==3?"FORGET":
+                        kind==4?"SKILL":kind==5?"ARCHIVE":kind==6?"RECALL":"SEMANTIC", name);
+                }
             }
-
             p = end + 1;
         }
+    }
+
+    /* Auto-log */
+    if (resp->content) {
+        os_file_handle_t lf = os_file_open("conversations.log", "a");
+        if (lf) {
+            char logline[4096];
+            int n = os_snprintf(logline, sizeof(logline),
+                "[%llu] Q: %s\nA: %s\n\n",
+                (unsigned long long)(os_clock_ms()), question, resp->content);
+            if (n > 0) os_file_write(lf, logline, (size_t)n);
+            os_file_close(lf);
+        }
+        /* L5 Archive: append to archive */
+        archive_append_log(NULL, question, resp->content);
+        /* Feed turn to segment tracker */
+        archive_feed_turn(question, resp->content);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════
+     * Phase 2: If skill was requested, do ONE more call with extra content
+     * ═══════════════════════════════════════════════════════════════════ */
+    if (show_skill_list || skill_loaded) {
+        if (debug) os_fprintf_stderr(DIM "──[DEBUG: Phase 2 (skill content)]───────" RST "\n");
+
+        /* Free phase 1 response before second call */
+        llm_response_free(resp);
+
+        BUILD_PROMPT();
+        g_spinner_on = 1;
+        g_ctx->first_token = 0;
+        os_printf("\n");
+        fflush(stdout);
+        os_thread_create(&tid, spinner_thread, NULL);
+        t0 = os_clock_ms();
+        llm_response_t *resp2 = llm_chat_stream(endpoint, api_key, model, prompt_buf, on_llm_token, NULL);
+        elapsed = os_clock_ms() - t0;
+        g_spinner_on = 0;
+        os_thread_join(tid);
+        if (resp2) resp2->latency_ms = elapsed;
+
+        if (!resp2) {
+            if (out) os_snprintf(out, out_len, RED "%% LLM unavailable" RST);
+            if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
+            return -1;
+        }
+
+        if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
+        if (g_ctx->saw_reasoning == 1) { print_reasoning_bottom(); os_printf("\n"); }
+
+        if (debug && resp2->content) {
+            os_fprintf_stderr(DIM "──[DEBUG: Phase 2 Response]────────────────" RST "\n");
+            int _sz = (int)os_strlen(resp2->content) < 2000 ? (int)os_strlen(resp2->content) : 2000;
+            os_fprintf_stderr(DIM "%.*s" RST "\n", _sz, resp2->content);
+            if (os_strlen(resp2->content) > 2000)
+                os_fprintf_stderr(DIM "... (%zu more bytes)" RST "\n", os_strlen(resp2->content) - 2000);
+            os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n");
+        }
+
+        /* L5 Archive: append Phase 2 */
+        if (resp2->content)
+            archive_append_log(NULL, question, resp2->content);
+        /* Feed turn (Phase 2 overwrites Phase 1's turn) */
+        if (resp2->content)
+            archive_feed_turn(question, resp2->content);
+
+        /* Stats bar */
+        if (out) {
+            size_t pos = 0;
+            pos += os_snprintf(out + pos, out_len - pos, DIM "  %.1fs", (double)resp2->latency_ms / 1000.0);
+            if (resp2->completion_tokens > 0) {
+                int tt = resp2->completion_tokens + (resp2->prompt_tokens > 0 ? resp2->prompt_tokens : 0);
+                pos += os_snprintf(out + pos, out_len - pos, " · %d tok", tt);
+                if (resp2->latency_ms > 0) {
+                    double tps = (double)tt / ((double)resp2->latency_ms / 1000.0);
+                    pos += os_snprintf(out + pos, out_len - pos, " · %.1f/s", tps);
+                }
+            }
+            g_ctx->session_tokens += resp2->prompt_tokens + resp2->completion_tokens;
+            if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
+                char mu[48]="", uu[48]="";
+                if (g_ctx->mem.count > 0) memfile_usage(&g_ctx->mem, mu, sizeof(mu));
+                if (g_ctx->user.count > 0) memfile_usage(&g_ctx->user, uu, sizeof(uu));
+                pos += os_snprintf(out + pos, out_len - pos, DIM " ‖ " RST);
+                if (g_ctx->mem.count > 0) pos += os_snprintf(out + pos, out_len - pos, DIM "mem %s" RST, mu);
+                if (g_ctx->user.count > 0) pos += os_snprintf(out + pos, out_len - pos, DIM " · you %s" RST, uu);
+            }
+            os_snprintf(out + pos, out_len - pos, RST);
+        }
+
+        llm_response_free(resp2);
+        return 0;
+    }
+
+    /* ── No skill — show stats for phase 1 response ─────────────────── */
+    if (out) {
+        size_t pos = 0;
+        pos += os_snprintf(out + pos, out_len - pos, DIM "  %.1fs", (double)resp->latency_ms / 1000.0);
+        if (resp->completion_tokens > 0) {
+            int tt = resp->completion_tokens + (resp->prompt_tokens > 0 ? resp->prompt_tokens : 0);
+            pos += os_snprintf(out + pos, out_len - pos, " · %d tok", tt);
+            if (resp->latency_ms > 0) {
+                double tps = (double)tt / ((double)resp->latency_ms / 1000.0);
+                pos += os_snprintf(out + pos, out_len - pos, " · %.1f/s", tps);
+            }
+        }
+        g_ctx->session_tokens += resp->prompt_tokens + resp->completion_tokens;
+        if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
+            char mu[48]="", uu[48]="";
+            if (g_ctx->mem.count > 0) memfile_usage(&g_ctx->mem, mu, sizeof(mu));
+            if (g_ctx->user.count > 0) memfile_usage(&g_ctx->user, uu, sizeof(uu));
+            pos += os_snprintf(out + pos, out_len - pos, DIM " ‖ " RST);
+            if (g_ctx->mem.count > 0) pos += os_snprintf(out + pos, out_len - pos, DIM "mem %s" RST, mu);
+            if (g_ctx->user.count > 0) pos += os_snprintf(out + pos, out_len - pos, DIM " · you %s" RST, uu);
+        }
+        os_snprintf(out + pos, out_len - pos, RST);
     }
 
     llm_response_free(resp);

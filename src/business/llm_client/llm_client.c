@@ -19,7 +19,7 @@
 #include "http_client.h"
 #include <string.h>
 
-#define BUF_SIZE    16384
+#define BUF_SIZE    65536
 
 /* ── Model discovery via .llm_models section scan ──────────────────── */
 

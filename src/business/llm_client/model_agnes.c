@@ -9,7 +9,7 @@
 #include "os_api.h"
 #include <string.h>
 
-#define BUF_SIZE 16384
+#define BUF_SIZE 65536
 
 /* ── Build request body ─────────────────────────────────────────── */
 

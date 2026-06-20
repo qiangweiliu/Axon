@@ -1,0 +1,24 @@
+# Kconfig — Archive 模块配置
+#
+# Layers:
+#   ext/    archive.h                  — External Interface (stable public API)
+#   compat/ archive.c directives.c     — Compatibility Layer (mapping + coordination)
+#   core/   strength.c topics.c        — Core Layer (pure logic, no I/O)
+#           segment.c keywords.c
+#   exec/   topics_file.c events.c     — Execution Layer (concrete I/O)
+#           log_store.c semantic.c
+#
+# Constraint: Core layer MUST NOT include os_api.h or memory.h.
+
+MODULE_SRCS = \
+    compat/archive.c compat/directives.c \
+    core/strength.c core/topics.c core/segment.c core/keywords.c \
+    exec/topics_file.c exec/events.c exec/log_store.c exec/semantic.c \
+    exec/episodes_file.c
+
+CFLAGS += -Isrc/business/archive
+CFLAGS += -Isrc/business/archive/ext
+CFLAGS += -Isrc/business/archive/compat
+CFLAGS += -Isrc/business/archive/core
+CFLAGS += -Isrc/business/archive/exec
+CFLAGS += -Isrc/business/memory

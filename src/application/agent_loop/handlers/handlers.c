@@ -71,6 +71,27 @@ void handle_note(const char *text, char *out, size_t out_len)
 void handle_profile(const char *text, char *out, size_t out_len)
 {
     if (!text || !*text) return;
+
+    /* Extract key (text before '=') for replace lookup */
+    const char *eq = os_strchr(text, '=');
+    if (eq) {
+        /* Try replace first (updates existing key in place) */
+        char key[256];
+        size_t klen = (size_t)(eq - text);
+        if (klen >= sizeof(key)) klen = sizeof(key) - 1;
+        os_memcpy(key, text, klen);
+        key[klen] = '\0';
+
+        if (memfile_replace(&g_ctx->user, key, text) == 0) {
+            memfile_save(&g_ctx->user);
+            char usage[64];
+            memfile_usage(&g_ctx->user, usage, sizeof(usage));
+            if (out) os_snprintf(out, out_len, GRY "✓ profile updated  (%s)" RST, usage);
+            return;
+        }
+    }
+
+    /* Key not found — append as new entry */
     if (memfile_add(&g_ctx->user, text) != 0) {
         if (out) os_snprintf(out, out_len,
             RED "%% profile full" RST " — use " GRY "forget" RST " to free space");
