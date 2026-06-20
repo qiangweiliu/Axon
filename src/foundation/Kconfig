@@ -4,3 +4,4 @@
 
 FOUNDATION_LDFLAGS = -lpthread
 LDFLAGS += $(FOUNDATION_LDFLAGS)
+CFLAGS += -Isrc/foundation

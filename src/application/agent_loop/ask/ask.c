@@ -11,6 +11,7 @@
 #include "agent.h"
 #include "tool_schema.h"
 #include "http_client.h"
+#include "token_counter.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -570,9 +571,14 @@ int handle_ask(const char *question, char *out, size_t out_len)
           for (size_t _i = 0; _i < _ql && pos < (int)sizeof(prompt_buf) - 1; _i++) { \
               char _c = _q[_i]; prompt_buf[pos++] = (_c == '\n') ? ' ' : _c; } \
           prompt_buf[pos] = '\0'; } \
+        { int _est = token_estimate(prompt_buf); \
+          if (_est > 6000) \
+            os_fprintf_stderr(DIM "──[WARN] prompt ~%d tokens (high)──────" RST "\n", _est); \
+        } \
         if (debug) { \
-            os_fprintf_stderr(DIM "──[PROMPT] (%zu bytes)────────────────────" RST "\n", \
-                              os_strlen(prompt_buf)); \
+            int _est = token_estimate(prompt_buf); \
+            os_fprintf_stderr(DIM "──[PROMPT] (%zu bytes, ~%d tok)───────────" RST "\n", \
+                              os_strlen(prompt_buf), _est); \
             os_fprintf_stderr("%s\n", prompt_buf); \
             os_fprintf_stderr(DIM "──────────────────────────────────────────" RST "\n"); \
         } \

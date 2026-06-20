@@ -659,6 +659,82 @@ static int tool_manager_start(framework_module_t *mod)
     };
     tool_register(&bash);
 
+    /* ── Load dynamic tools from data/tools/*.json ────────────────── */
+    {
+        os_dir_handle_t dh = os_dir_open("data/tools");
+        if (dh) {
+            const char *entry;
+            while ((entry = os_dir_next(dh)) != NULL) {
+                size_t elen = os_strlen(entry);
+                if (elen < 6) continue;  /* at least "x.json" */
+                const char *ext = entry + elen - 5;
+                if (os_strcmp(ext, ".json") != 0) continue;
+
+                char path[512];
+                os_snprintf(path, sizeof(path), "data/tools/%s", entry);
+                os_file_handle_t fh = os_file_open(path, "r");
+                if (!fh) continue;
+                char jbuf[4096];
+                size_t nr = os_file_read(fh, jbuf, sizeof(jbuf) - 1);
+                os_file_close(fh);
+                if (nr == 0) continue;
+                jbuf[nr] = '\0';
+
+                /* Simple JSON extract: "name", "description", "risk" */
+                char dname[64] = "";
+                char ddesc[256] = "";
+                int  drisk = TOOL_RISK_SAFE;
+
+                const char *nk = strstr(jbuf, "\"name\"");
+                if (nk) {
+                    nk = strchr(nk, ':');
+                    if (nk) {
+                        nk++; while (*nk == ' ' || *nk == '"') nk++;
+                        size_t i = 0;
+                        while (nk[i] && nk[i] != '"' && i < sizeof(dname)-1)
+                            { dname[i] = nk[i]; i++; }
+                        dname[i] = '\0';
+                    }
+                }
+                const char *dk = strstr(jbuf, "\"description\"");
+                if (dk) {
+                    dk = strchr(dk, ':');
+                    if (dk) {
+                        dk++; while (*dk == ' ' || *dk == '"') dk++;
+                        size_t i = 0;
+                        while (dk[i] && dk[i] != '"' && i < sizeof(ddesc)-1)
+                            { ddesc[i] = dk[i]; i++; }
+                        ddesc[i] = '\0';
+                    }
+                }
+                const char *rk = strstr(jbuf, "\"risk\"");
+                if (rk) {
+                    rk = strchr(rk, ':');
+                    if (rk) {
+                        rk++; while (*rk == ' ' || *rk == '"') rk++;
+                        if (os_strncmp(rk, "shell", 5) == 0) drisk = TOOL_RISK_SHELL;
+                        else if (os_strncmp(rk, "write", 5) == 0) drisk = TOOL_RISK_WRITE;
+                    }
+                }
+
+                if (!dname[0]) continue;
+                /* Skip if already registered (built-in) */
+                tool_info_t exist;
+                if (tool_find(dname, &exist) == 0) continue;
+
+                tool_def_t dt;
+                os_memset(&dt, 0, sizeof(dt));
+                dt.name = dname;
+                dt.description = ddesc;
+                dt.params_json = "{\"type\":\"object\",\"properties\":{}}";
+                dt.risk = drisk;
+                dt.execute = echo_execute;  /* safe generic handler */
+                tool_register(&dt);
+            }
+            os_dir_close(dh);
+        }
+    }
+
     LOG_INFO("ToolManager: ready (%d tool%s)",
              g_ctx->tool_count, g_ctx->tool_count == 1 ? "" : "s");
     return 0;

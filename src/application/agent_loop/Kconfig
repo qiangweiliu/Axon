@@ -1,6 +1,6 @@
 # Kconfig — AgentLoop 模块配置
 
-MODULE_SRCS = repl/agent_loop.c ask/ask.c handlers/handlers.c memfile/memfile.c input/input.c
+MODULE_SRCS = repl/agent_loop.c ask/ask.c handlers/handlers.c memfile/memfile.c input/input.c ../../foundation/token_counter.c
 
 CFLAGS += -Isrc/application/agent_loop
 CFLAGS += -Isrc/application/agent_loop/repl
