@@ -8,8 +8,7 @@
 #include "memfile.h"
 #include "skill_manager.h"
 #include "archive.h"
-#include "tool_manager.h"
-
+#include "tool_dispatch.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -686,37 +685,17 @@ int handle_ask(const char *question, char *out, size_t out_len)
                     archive_handle_semantic(name);
                     os_snprintf(fb, sizeof(fb), "Semantic stored");
                 } else if (kind == 8) {
-                    /* [TOOL:] directive — call a tool */
-                    /* Format: name | args={...} */
-                    char tool_name[64];
-                    char tool_args[1024] = "{}";
-                    const char *pipe = strstr(name, " | ");
-                    if (pipe) {
-                        size_t nlen = (size_t)(pipe - name);
-                        if (nlen >= sizeof(tool_name)) nlen = sizeof(tool_name) - 1;
-                        os_memcpy(tool_name, name, nlen);
-                        tool_name[nlen] = '\0';
-                        const char *args_start = pipe + 3;
-                        if (strstr(args_start, "args="))
-                            args_start += 5;
-                        os_strncpy(tool_args, args_start, sizeof(tool_args) - 1);
-                    } else {
-                        os_strncpy(tool_name, name, sizeof(tool_name) - 1);
-                    }
-
+                    /* [TOOL:] directive — delegate to business layer */
                     char tool_result[4096];
-                    int rc = tool_call(tool_name, tool_args,
-                                       tool_result, sizeof(tool_result));
-                    if (rc >= 0) {
-                        /* Store result for Phase 2 injection */
+                    if (tool_dispatch(name, tool_result, sizeof(tool_result)) == 0) {
                         size_t rlen = os_strlen(tool_result);
                         if (rlen >= sizeof(extra_buf)) rlen = sizeof(extra_buf) - 1;
                         os_memcpy(extra_buf, tool_result, rlen);
                         extra_buf[rlen] = '\0';
                         skill_loaded = 1; /* triggers Phase 2 */
-                        os_snprintf(fb, sizeof(fb), "Tool '%s' called (%zu chars)", tool_name, rlen);
+                        os_snprintf(fb, sizeof(fb), "Tool called (%zu chars)", rlen);
                     } else {
-                        os_snprintf(fb, sizeof(fb), "Tool '%s' not found", tool_name);
+                        os_snprintf(fb, sizeof(fb), "Tool dispatch failed: %s", tool_result);
                     }
                 }
 
@@ -755,13 +734,17 @@ int handle_ask(const char *question, char *out, size_t out_len)
      * ═══════════════════════════════════════════════════════════════════ */
     int phase2_resp = (show_skill_list || skill_loaded);
     int loop_count = 0;
+    llm_response_t *resp2 = NULL;
     while (phase2_resp && loop_count < 3) {
         loop_count++;
         if (debug) os_fprintf_stderr(DIM "──[DEBUG: Phase 2 (round %d)]───────" RST "\n", loop_count);
 
-        /* Free previous response before next call */
-        if (loop_count > 1) llm_response_free(resp);
-        else llm_response_free(resp); /* free phase 1 */
+        /* Free previous round's response */
+        if (loop_count == 1) {
+            llm_response_free(resp);  /* free phase 1 response */
+        } else if (resp2) {
+            llm_response_free(resp2); /* free previous phase 2 response */
+        }
 
         BUILD_PROMPT();
         g_spinner_on = 1;
@@ -770,7 +753,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
         fflush(stdout);
         os_thread_create(&tid, spinner_thread, NULL);
         t0 = os_clock_ms();
-        llm_response_t *resp2 = llm_chat_stream(endpoint, api_key, model, prompt_buf, on_llm_token, NULL);
+        resp2 = llm_chat_stream(endpoint, api_key, model, prompt_buf, on_llm_token, NULL);
         elapsed = os_clock_ms() - t0;
         g_spinner_on = 0;
         os_thread_join(tid);
@@ -801,8 +784,48 @@ int handle_ask(const char *question, char *out, size_t out_len)
         if (resp2->content)
             archive_feed_turn(question, resp2->content);
 
-        /* Stats bar */
-        if (out) {
+        /* Check for tool calls in Phase 2 response — BEFORE freeing */
+        phase2_resp = 0;
+        if (resp2->content && strstr(resp2->content, "[TOOL:")) {
+            const char *pp = resp2->content;
+            while (pp) {
+                const char *tool_p = strstr(pp, "[TOOL:");
+                if (!tool_p) break;
+                const char *start = tool_p + 6;
+                const char *end = strchr(start, ']');
+                if (!end) break;
+
+                char name[1024];
+                size_t clen = (size_t)(end - start);
+                size_t cp = clen < sizeof(name) - 1 ? clen : sizeof(name) - 1;
+                os_memcpy(name, start, cp);
+                name[cp] = '\0';
+
+                char tool_result[4096];
+                if (tool_dispatch(name, tool_result, sizeof(tool_result)) == 0) {
+                    size_t rlen = os_strlen(tool_result);
+                    if (rlen >= sizeof(extra_buf)) rlen = sizeof(extra_buf) - 1;
+                    os_memcpy(extra_buf, tool_result, rlen);
+                    extra_buf[rlen] = '\0';
+                    phase2_resp = 1;
+                    LOG_INFO("Tool loop: called (%zu chars)", rlen);
+                }
+                pp = end + 1;
+            }
+        }
+
+        /* Now safe to free resp2 (no more accesses) */
+        if (!phase2_resp) {
+            llm_response_free(resp2);
+            resp2 = NULL;
+            break;
+        }
+    }
+
+    /* ── End of Phase 2+ loop ──────────────────────────────────────── */
+    if (loop_count > 0) {
+        /* Print final response stats from last phase 2 response */
+        if (resp2 && out) {
             size_t pos = 0;
             pos += os_snprintf(out + pos, out_len - pos, DIM "  %.1fs", (double)resp2->latency_ms / 1000.0);
             if (resp2->completion_tokens > 0) {
@@ -824,73 +847,11 @@ int handle_ask(const char *question, char *out, size_t out_len)
             }
             os_snprintf(out + pos, out_len - pos, RST);
         }
-
-        llm_response_free(resp2);
-
-        /* Check if Phase 2 response also has a tool call → keep looping */
-        phase2_resp = 0;
-        if (resp2->content && strstr(resp2->content, "[TOOL:")) {
-            /* Re-parse directives from Phase 2 response */
-            const char *pp = resp2->content;
-            while (pp) {
-                const char *tool_p = strstr(pp, "[TOOL:");
-                if (!tool_p) break;
-                const char *start = tool_p + 6;
-                const char *end = strchr(start, ']');
-                if (!end) break;
-
-                char name[1024];
-                size_t clen = (size_t)(end - start);
-                size_t cp = clen < sizeof(name) - 1 ? clen : sizeof(name) - 1;
-                os_memcpy(name, start, cp);
-                name[cp] = '\0';
-
-                char tool_name[64];
-                char tool_args[1024] = "{}";
-                const char *pipe = strstr(name, " | ");
-                if (pipe) {
-                    size_t nlen = (size_t)(pipe - name);
-                    if (nlen >= sizeof(tool_name)) nlen = sizeof(tool_name) - 1;
-                    os_memcpy(tool_name, name, nlen);
-                    tool_name[nlen] = '\0';
-                    const char *args_start = pipe + 3;
-                    if (strstr(args_start, "args=")) args_start += 5;
-                    os_strncpy(tool_args, args_start, sizeof(tool_args) - 1);
-                } else {
-                    os_strncpy(tool_name, name, sizeof(tool_name) - 1);
-                }
-
-                char tool_result[4096];
-                int rc = tool_call(tool_name, tool_args,
-                                   tool_result, sizeof(tool_result));
-                if (rc >= 0) {
-                    size_t rlen = os_strlen(tool_result);
-                    if (rlen >= sizeof(extra_buf)) rlen = sizeof(extra_buf) - 1;
-                    os_memcpy(extra_buf, tool_result, rlen);
-                    extra_buf[rlen] = '\0';
-                    phase2_resp = 1;
-                    LOG_INFO("Tool loop: '%s' called (%zu chars)", tool_name, rlen);
-                }
-                pp = end + 1;
-            }
-        }
-
-        if (!phase2_resp)
-            break; /* no more tools → exit loop */
+        if (resp2) { llm_response_free(resp2); resp2 = NULL; }
     }
 
-    /* ── End of Phase 2+ loop ──────────────────────────────────────── */
-    if (loop_count > 0) {
-        /* Stats - use last phase2 response data if available */
-        if (out) {
-            size_t pos = 0;
-            /* Don't print stats for intermediate tool calls */
-            os_snprintf(out, out_len, RST);
-        }
-    }
-
-    /* ── No phase 2 — show stats for phase 1 response ─────────────────── */
-    if (out) {
+    /* ── No skill — show stats for phase 1 response ─────────────────── */
+    if (out && resp) {
         size_t pos = 0;
         pos += os_snprintf(out + pos, out_len - pos, DIM "  %.1fs", (double)resp->latency_ms / 1000.0);
         if (resp->completion_tokens > 0) {

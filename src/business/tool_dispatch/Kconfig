@@ -1,0 +1,6 @@
+# Kconfig — Tool Dispatch 模块
+
+MODULE_SRCS = tool_dispatch.c
+
+CFLAGS += -Isrc/business/tool_dispatch
+CFLAGS += -Isrc/business/tool_manager

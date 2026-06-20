@@ -11,3 +11,4 @@ CFLAGS += -Isrc/application/agent_loop/input
 CFLAGS += -Isrc/business/skill_manager
 CFLAGS += -Isrc/business/archive
 CFLAGS += -Isrc/business/archive/ext
+CFLAGS += -Isrc/business/tool_dispatch
