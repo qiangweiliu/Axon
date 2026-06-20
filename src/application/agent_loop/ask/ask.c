@@ -403,7 +403,9 @@ int handle_ask(const char *question, char *out, size_t out_len)
     recall_buf[0] = '\0';
     int recalled = archive_auto_recall(question, recall_buf, sizeof(recall_buf));
     if (recalled && debug)
-        os_fprintf_stderr(DIM "──[RECALLED: depth auto]──\n%s──" RST "\n", recall_buf);
+        os_fprintf_stderr(DIM "──[RECALL] (%zu bytes)───────────────────────" RST "\n%s"
+                          DIM "──────────────────────────────────────────" RST "\n",
+                          os_strlen(recall_buf), recall_buf);
 
     /* ── Prompt builder ─────────────────────────────────────────────── */
     char prompt_buf[65536];
@@ -841,7 +843,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
 
     /* ── Phase 2: skill content — do one more LLM call ── */
     if (show_skill_list || skill_loaded) {
-        if (debug) os_fprintf_stderr(DIM "──[DEBUG: Phase 2]───────" RST "\n");
+        if (debug) os_fprintf_stderr(DIM "──[PHASE2]──────────────────────────────────" RST "\n");
 
         BUILD_PROMPT();
         g_spinner_on = 1;
