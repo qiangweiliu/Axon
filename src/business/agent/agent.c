@@ -35,24 +35,21 @@ int agent_run(const char *endpoint,
 {
     if (!endpoint || !model || !ctx || !question || !answer || answer_len < 2)
         return -1;
+    (void)question;  /* question is embedded in base_prompt, not used separately */
 
     char buf[128 * 1024];
     int depth = 0;
     int max_depth = ctx->max_depth > 0 ? ctx->max_depth : AGENT_MAX_DEPTH;
 
-    /* Round 0: build initial prompt */
+    /* Build initial prompt from base_prompt (ask.c's BUILD_PROMPT already
+     * includes system, tool schema, skills, language, topics, and question).
+     * Tool schema and question are NOT re-added — the base already has them. */
     int pos = 0;
     if (ctx->base_prompt)
         pos += os_snprintf(buf + pos, sizeof(buf) - pos, "%s", ctx->base_prompt);
 
     /* Save the base length so we can truncate back on retries */
     int base_end = pos;
-
-    /* Append tool schema */
-    pos += tool_schema_build(buf + pos, sizeof(buf) - pos);
-
-    /* Append user question (only added once — it's always the same) */
-    pos += os_snprintf(buf + pos, sizeof(buf) - pos, "User: %s\n", question);
 
     /* Buffer for preserving LLM's last tool-call response across iterations */
     char prev_llm_output[4096];
@@ -102,9 +99,9 @@ int agent_run(const char *endpoint,
         os_memcpy(prev_llm_output, resp->content, prev_len);
         prev_llm_output[prev_len] = '\0';
 
-        /* Truncate back to base+question, then append history for context */
+        /* Truncate back to base (which already includes the question),
+         * then append tool call history for context */
         pos = base_end;
-        pos += os_snprintf(buf + pos, sizeof(buf) - pos, "User: %s\n", question);
         /* Include the LLM's own previous tool call so it sees the chain */
         if (prev_llm_output[0]) {
             pos += os_snprintf(buf + pos, sizeof(buf) - pos,

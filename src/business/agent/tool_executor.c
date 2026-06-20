@@ -12,24 +12,48 @@
 #include <string.h>
 
 /*
- * Normalize JSON: replace all single quotes with double quotes.
- * This is a best-effort transform to make LLM single-quote JSON parseable.
- * Simple global replacement: every ' becomes ".  This handles the common
- * case of LLM outputting {'name':'value',...} instead of {"name":"value",...}.
- * One edge case: apostrophes inside string values ("it's fine") also get
- * replaced, but this is rare in tool call arguments and acceptable.
+ * Normalize JSON: replace single quotes with double quotes,
+ * but only for JSON structural delimiters (not literal ' inside values).
+ *
+ * Strategy:
+ *   - Outside a string: ' is an opening JSON delimiter → replace with "
+ *   - Inside a string: check if ' is followed by , } ] or : (closing delimiter)
+ *     → yes: replace with " (exit string)
+ *     → no:  literal ' inside value → leave as-is
+ *   - Handles escaped chars: \\, \', \", etc. — skip past them
+ *
+ * Examples:
+ *   {'name':'bash'}           → {"name":"bash"}        (key+value quoted)
+ *   {'cmd':'echo 'hello''}    → {"cmd":"echo 'hello'"} (literal ' preserved)
  */
 static void normalize_json(char *buf)
 {
     if (!buf || !*buf) return;
+    int in_str = 0;
     int replacements = 0;
     LOG_DEBUG("ToolExec: normalize input (first 100): %.*s", 100, buf);
     for (char *p = buf; *p; p++) {
-        if (*p == '\'') {
-            /* Skip escaped single quotes */
-            if (p > buf && *(p-1) == '\\') continue;
+        if (*p == '\\' && *(p + 1)) {
+            p++;  /* skip escaped character (\\, \', \", etc.) */
+            continue;
+        }
+        if (*p == '"') {
+            in_str = !in_str;
+        } else if (*p == '\'' && !in_str) {
+            /* Outside string: ' is an opening JSON delimiter */
             *p = '"';
+            in_str = 1;
             replacements++;
+        } else if (*p == '\'' && in_str) {
+            /* Inside string: check if ' is structural closing delimiter */
+            const char *next = p + 1;
+            while (*next == ' ' || *next == '\t') next++;
+            if (*next == ',' || *next == '}' || *next == ']' || *next == ':') {
+                *p = '"';
+                in_str = 0;
+                replacements++;
+            }
+            /* else: literal ' inside value (e.g. '*.git'), leave as-is */
         }
     }
     LOG_DEBUG("ToolExec: normalize done (%d replacements)", replacements);
