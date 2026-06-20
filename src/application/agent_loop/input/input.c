@@ -155,7 +155,7 @@ static void redraw_line(const char *buf, int len, int cursor)
         out[pos++] = (char)('0' + col % 10);
         out[pos++] = 'G';
     }
-    write(STDOUT_FILENO, out, (size_t)pos);
+    (void)!write(STDOUT_FILENO, out, (size_t)pos);
 }
 
 /* ── Raw mode ──────────────────────────────────────────────────────────── */
@@ -275,7 +275,7 @@ int read_line_raw(char *buf, int max)
         /* Enter / Return */
         if (c == '\r' || c == '\n') {
             buf[len] = '\0';
-            write(STDOUT_FILENO, "\r\n", 2);
+            (void)!write(STDOUT_FILENO, "\r\n", 2);
             return len;
         }
 

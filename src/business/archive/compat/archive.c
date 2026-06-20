@@ -163,7 +163,6 @@ int archive_chain(const char *query, int depth,
             if (g_arc->topics[i].episode_id[0] &&
                 (strstr(g_arc->topics[i].topic, query) ||
                  strstr(g_arc->topics[i].summary, query))) {
-                char ebuf[1024] = "";
                 /* Search by episode_id in the episodes file */
                 ep_search(g_arc->topics[i].episode_id, result_buf, result_len);
                 found++;

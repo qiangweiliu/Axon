@@ -659,7 +659,7 @@ static int tool_manager_start(framework_module_t *mod)
     };
     tool_register(&bash);
 
-    /* ── Load dynamic tools from data/tools/*.json ────────────────── */
+    /* ── Load dynamic tools from data/tools/ (JSON files) ─────────── */
     {
         os_dir_handle_t dh = os_dir_open("data/tools");
         if (dh) {

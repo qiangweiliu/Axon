@@ -45,6 +45,16 @@ static int process_line(const char *line, char *out, size_t out_len)
         handle_forget("", out, out_len);
     } else if (os_strncmp(line, "echo ", 5) == 0) {
         handle_echo(line + 5, out, out_len);
+    } else if (os_strncmp(line, "model ", 6) == 0) {
+        const char *new_model = line + 6;
+        while (*new_model == ' ') new_model++;
+        if (config_set("llm.model", new_model) == 0) {
+            const config_t *cfg = config_get();
+            if (out) os_snprintf(out, out_len,
+                GRN "✓ model switched" RST " → %s", cfg ? cfg->llm_model : new_model);
+        } else {
+            if (out) os_snprintf(out, out_len, RED "✗ failed" RST);
+        }
     } else if (os_strcmp(line, "reload") == 0) {
         const config_t *new_cfg = config_reload();
         if (new_cfg) {

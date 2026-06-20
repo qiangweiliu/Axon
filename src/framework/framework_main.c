@@ -24,6 +24,7 @@ static void signal_handler(int sig)
 
 /* ── Normal Agent Run (prompt.txt) ───────────────────────────────── */
 
+__attribute__((unused))
 static int run_agent(void)
 {
     os_signal_set(SIGINT, signal_handler);

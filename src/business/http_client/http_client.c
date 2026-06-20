@@ -59,8 +59,13 @@ static http_response_t *parse_response(char *buf, size_t total)
     /* Find header-body boundary: \r\n\r\n */
     char *body_start = strstr(buf, "\r\n\r\n");
     if (!body_start) {
-        resp->body = buf;
-        resp->body_len = total;
+        /* No headers — copy entire buffer as body */
+        resp->body = (char *)os_alloc(total + 1);
+        if (resp->body) {
+            os_memcpy(resp->body, buf, total);
+            resp->body[total] = '\0';
+            resp->body_len = total;
+        }
         return resp;
     }
     body_start += 4;
@@ -149,7 +154,7 @@ static http_response_t *https_request(const char *method,
         char tmp_path[] = "/tmp/http_body_XXXXXX";
         int tmp_fd = mkstemp(tmp_path);
         if (tmp_fd < 0) return NULL;
-        write(tmp_fd, body, (size_t)body_len);
+        (void)!write(tmp_fd, body, (size_t)body_len);
         close(tmp_fd);
         pos += os_snprintf(cmd + pos, sizeof(cmd) - pos, " -d '@%s'", tmp_path);
     }
@@ -184,7 +189,9 @@ static http_response_t *https_request(const char *method,
                   (int)(total < 200 ? total : 200), buf);
     }
 
-    return parse_response(buf, total);
+    http_response_t *resp = parse_response(buf, total);
+    os_free(buf);  /* parse_response always copies, safe to free */
+    return resp;
 }
 
 /* ── HTTPS Streaming via curl (line by line) ────────────────────────── */
@@ -237,7 +244,7 @@ int https_post_stream(const char *host, int port,
         char tmp_path[] = "/tmp/http_body_XXXXXX";
         int tmp_fd = mkstemp(tmp_path);
         if (tmp_fd < 0) return -1;
-        write(tmp_fd, body, (size_t)body_len);
+        (void)!write(tmp_fd, body, (size_t)body_len);
         close(tmp_fd);
         pos += os_snprintf(cmd + pos, sizeof(cmd) - pos, " -d '@%s'", tmp_path);
     }

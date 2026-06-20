@@ -206,7 +206,7 @@ int archive_auto_recall(const char *question, char *result_buf, size_t result_le
  * L0: memories/memory.md, memories/user.md
  * L1: memories/topics.md
  * L2+L4: data/memory.db (all entries)
- * L3: data/events/*.json
+ * L3: data/events/ (JSON files)
  * L5: data/archive/ (all logs)
  * After this, the agent starts with a blank slate.
  * Returns 0 on success. */

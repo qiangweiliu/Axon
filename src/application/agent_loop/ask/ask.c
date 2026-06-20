@@ -979,6 +979,8 @@ int handle_ask(const char *question, char *out, size_t out_len)
                 }
             }
             g_ctx->session_tokens += resp2->prompt_tokens + resp2->completion_tokens;
+            if (g_ctx->session_tokens > 0)
+                pos += os_snprintf(out + pos, out_len - pos, DIM " 〰 %d tok" RST, g_ctx->session_tokens);
             if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
                 char mu[48]="", uu[48]="";
                 if (g_ctx->mem.count > 0) memfile_usage(&g_ctx->mem, mu, sizeof(mu));
@@ -1014,6 +1016,8 @@ int handle_ask(const char *question, char *out, size_t out_len)
             }
         }
         g_ctx->session_tokens += resp->prompt_tokens + resp->completion_tokens;
+        if (g_ctx->session_tokens > 0)
+            pos += os_snprintf(out + pos, out_len - pos, DIM " 〰 %d tok" RST, g_ctx->session_tokens);
         if (g_ctx->mem.count > 0 || g_ctx->user.count > 0) {
             char mu[48]="", uu[48]="";
             if (g_ctx->mem.count > 0) memfile_usage(&g_ctx->mem, mu, sizeof(mu));
