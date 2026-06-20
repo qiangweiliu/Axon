@@ -21,6 +21,9 @@ int tool_dispatch(const char *text, char *result, size_t result_len)
     char tool_name[64];
     char tool_args[1024] = "{}";
 
+    /* Skip leading whitespace */
+    while (*text == ' ' || *text == '\t') text++;
+
     const char *pipe = strstr(text, " | ");
     if (pipe) {
         /* Extract tool name (text before " | ") */

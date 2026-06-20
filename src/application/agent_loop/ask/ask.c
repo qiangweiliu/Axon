@@ -742,6 +742,7 @@ int handle_ask(const char *question, char *out, size_t out_len)
         /* Free previous round's response */
         if (loop_count == 1) {
             llm_response_free(resp);  /* free phase 1 response */
+            resp = NULL;              /* prevent double free at end */
         } else if (resp2) {
             llm_response_free(resp2); /* free previous phase 2 response */
         }
@@ -877,3 +878,5 @@ int handle_ask(const char *question, char *out, size_t out_len)
     llm_response_free(resp);
     return 0;
 }
+
+/* ── EOF ──────────────────────────────────────────────────────── */
