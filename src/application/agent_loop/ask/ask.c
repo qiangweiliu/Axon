@@ -417,9 +417,16 @@ int handle_ask(const char *question, char *out, size_t out_len)
         http_set_timeout(cfg->llm_timeout_sec);
 
     /* ── Event segmentation: detect topic shift ─────────────────────── */
+    /* ── Multi-turn conversation history (last 3 exchanges) ────────── */
+    #define CTX_HIST_MAX 3
+    static char g_ctx_history[CTX_HIST_MAX * 2][4096];  /* alternating user/assistant */
+    static int  g_ctx_hist_count = 0;
+
     int topic_shift = archive_detect_topic_shift(question);
     if (topic_shift) {
         archive_flush_segment(ARC_IMP_MEDIUM);
+        /* Reset history on topic shift */
+        g_ctx_hist_count = 0;
         if (debug) os_fprintf_stderr(DIM "──[EVENT: topic shift]──" RST "\n");
     }
 
@@ -519,6 +526,17 @@ int handle_ask(const char *question, char *out, size_t out_len)
         if (recall_buf[0]) { \
             pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
                 "%s\n", recall_buf); \
+        } \
+        /* Conversation history (last 3 exchanges) */ \
+        if (g_ctx_hist_count > 0) { \
+            pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
+                "Previous conversation:\n"); \
+            int start = g_ctx_hist_count > CTX_HIST_MAX * 2 \
+                      ? g_ctx_hist_count - CTX_HIST_MAX * 2 : 0; \
+            for (int _h = start; _h < g_ctx_hist_count; _h++) { \
+                pos += os_snprintf(prompt_buf + pos, sizeof(prompt_buf) - pos, \
+                    "%s\n", g_ctx_history[_h]); \
+            } \
         } \
         /* Layer 2: Context (skills list on demand) */ \
         if (show_skill_list) { \
@@ -882,6 +900,13 @@ int handle_ask(const char *question, char *out, size_t out_len)
                 os_snprintf(out + pos, out_len - pos, RST);
             }
 
+            /* Save to conversation history */
+            if (agent_answer[0] && g_ctx_hist_count < CTX_HIST_MAX * 2) {
+                os_snprintf(g_ctx_history[g_ctx_hist_count++], 4096,
+                            "User: %s", question);
+                os_snprintf(g_ctx_history[g_ctx_hist_count++], 4096,
+                            "Assistant: %s", agent_answer);
+            }
             llm_response_free(resp);
             return 0;
         }
@@ -964,6 +989,13 @@ int handle_ask(const char *question, char *out, size_t out_len)
     }
 
     /* ── No skill/tool — show stats for phase 1 response ────────────── */
+    /* Save to conversation history */
+    if (resp && resp->content && resp->content[0] && g_ctx_hist_count < CTX_HIST_MAX * 2) {
+        os_snprintf(g_ctx_history[g_ctx_hist_count++], 4096,
+                    "User: %s", question);
+        os_snprintf(g_ctx_history[g_ctx_hist_count++], 4096,
+                    "Assistant: %s", resp->content);
+    }
     if (out && resp) {
         size_t pos = 0;
         pos += os_snprintf(out + pos, out_len - pos, DIM "  %.1fs", (double)resp->latency_ms / 1000.0);
