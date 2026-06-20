@@ -119,8 +119,31 @@ int agent_run(const char *endpoint,
         depth++;
     }
 
-    os_snprintf(answer, answer_len,
-        "[Completed after %d tool call(s)]\n%s",
-        depth, prev_llm_output);
+    /* Strip <tool_call> tag from display output */
+    {
+        char clean[4096];
+        const char *src = prev_llm_output;
+        char *dst = clean;
+        size_t remain = sizeof(clean) - 1;
+        while (*src && remain > 0) {
+            const char *tc = strstr(src, "<tool_call>");
+            if (tc) {
+                size_t pre = (size_t)(tc - src);
+                if (pre > remain) pre = remain;
+                os_memcpy(dst, src, pre); dst += pre; remain -= pre;
+                const char *end = strstr(tc, "</tool_call>");
+                src = end ? end + 12 : tc + 11;  /* skip past </tool_call> or <tool_call> */
+            } else {
+                size_t n = os_strlen(src);
+                if (n > remain) n = remain;
+                os_memcpy(dst, src, n); dst += n;
+                break;
+            }
+        }
+        *dst = '\0';
+        os_snprintf(answer, answer_len,
+            "%s", clean[0] ? clean : "[Completed after %d tool call(s)]",
+            depth);
+    }
     return 1;
 }
