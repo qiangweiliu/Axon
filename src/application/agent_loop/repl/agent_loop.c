@@ -139,27 +139,9 @@ static int process_line(const char *line, char *out, size_t out_len)
     return 0;
 }
 
-/* ── Command History ──────────────────────────────────────────────── */
-
-#define HIST_MAX 50
-
-static char  g_hist[HIST_MAX][PROMPT_MAX];
-static int   g_hist_count;   /* total entered */
-static int   g_hist_pos;     /* -1 = new input, 0..count-1 = browsing */
-
-static void hist_push(const char *line)
-{
-    if (!line || !*line) return;
-    if (g_hist_count > 0 &&
-        os_strcmp(g_hist[(g_hist_count-1) % HIST_MAX], line) == 0)
-        return;
-    size_t len = os_strlen(line);
-    if (len >= PROMPT_MAX) len = PROMPT_MAX - 1;
-    os_memcpy(g_hist[g_hist_count % HIST_MAX], line, len);
-    g_hist[g_hist_count % HIST_MAX][len] = '\0';
-    g_hist_count++;
-    g_hist_pos = -1;
-}
+/* Command history is managed by input.c (history_add / read_line_raw).
+ * Keep a local copy of the current line for hist_push.removed — now calls
+ * history_add() from input.h. */
 
 /* ── REPL (Interactive) ───────────────────────────────────────────── */
 
@@ -216,7 +198,7 @@ void agent_loop_repl(void)
         while (*t == ' ' || *t == '\t') t++;
         if (!*t) continue;
 
-        hist_push(t);
+        history_add(t);
 
         char result[4096] = "";
         int rc = process_line(t, result, sizeof(result));
