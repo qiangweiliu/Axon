@@ -92,7 +92,12 @@ int agent_run(const char *endpoint,
         if (status == TOOL_PARSE_INVALID) {
             os_snprintf(tool_result, sizeof(tool_result),
                 "Error: tool call format is invalid.\n"
-                "Use <tool_call>...</tool_call> with proper JSON.\n");
+                "Use <tool_call>...</tool_call> with proper JSON.\n"
+                "Hint: use single quotes for the outer JSON to avoid "
+                "escaping internal double-quotes.\n"
+                "Example: <tool_call>\n"
+                "{'name':'bash','arguments':{'command':'echo \"hello\"'}}\n"
+                "</tool_call>\n");
         } else {
             tool_execute_call(&call, tool_result, sizeof(tool_result));
         }
@@ -119,7 +124,33 @@ int agent_run(const char *endpoint,
         depth++;
     }
 
-    /* Strip <tool_call> tag from display output */
+    /* Max depth reached — make one final LLM call asking for a natural
+     * language summary, using all collected tool results as context. */
+    if (depth >= max_depth && prev_llm_output[0]) {
+        pos = base_end;
+        if (prev_llm_output[0]) {
+            pos += os_snprintf(buf + pos, sizeof(buf) - pos,
+                "Previous assistant output:\n%s\n", prev_llm_output);
+        }
+        pos += os_snprintf(buf + pos, sizeof(buf) - pos,
+            "Tool result from the last call is shown above.\n\n"
+            "You have reached the maximum number of tool calls. "
+            "Please provide a final natural language answer to the user "
+            "summarizing what you found. Do NOT output any more "
+            "<tool_call> tags — just give the answer directly.\n");
+
+        llm_response_t *final_resp = llm_chat(endpoint, api_key, model, buf);
+        if (final_resp && final_resp->content && final_resp->content[0]) {
+            /* If the LLM cooperates and returns a non-tool answer, use it */
+            if (!strstr(final_resp->content, "<tool_call>")) {
+                os_strncpy(answer, final_resp->content, answer_len);
+                llm_response_free(final_resp);
+                return 0;
+            }
+        }
+    }
+
+    /* Fallback: strip <tool_call> tag from display output */
     {
         char clean[4096];
         const char *src = prev_llm_output;

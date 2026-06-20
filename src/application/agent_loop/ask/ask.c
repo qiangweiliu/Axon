@@ -326,6 +326,10 @@ static void print_token(const char *token, const char *color_prefix)
 
 
 /* First token callback — stops spinner, shows response */
+/* Token accumulation for tool-call detection during streaming */
+static char g_token_buf[8192];
+static int  g_token_buf_len = 0;
+
 /* States: first_token=0 initial, 1=box open, 2=box closed */
 static void on_llm_token(const char *token, size_t len,
                          int tokens_so_far, uint64_t elapsed_ms,
@@ -336,6 +340,25 @@ static void on_llm_token(const char *token, size_t len,
     (void)tokens_so_far;
     (void)elapsed_ms;
     (void)user;
+
+    /* Accumulate tokens to detect <tool_call> in stream */
+    {
+        size_t tlen = os_strlen(token);
+        if (g_token_buf_len + tlen < sizeof(g_token_buf) - 1) {
+            os_memcpy(g_token_buf + g_token_buf_len, token, tlen);
+            g_token_buf_len += tlen;
+            g_token_buf[g_token_buf_len] = '\0';
+        }
+    }
+
+    /* Detect tool call in stream — suppress display, close box */
+    if (strstr(g_token_buf, "<tool_call>")) {
+        if (g_ctx->saw_reasoning >= 2) print_answer_bottom();
+        g_ctx->saw_reasoning = 3;  /* tool mode — suppress further display */
+        g_spinner_on = 0;
+        return;
+    }
+    if (g_ctx->saw_reasoning == 3) return;  /* already in tool mode */
 
     /*
      * First token ever:
@@ -349,6 +372,8 @@ static void on_llm_token(const char *token, size_t len,
 
         os_sleep_ms(300);
         os_printf("\033[K");
+        g_token_buf_len = 0;
+        g_token_buf[0] = '\0';
         g_ctx->saw_reasoning = 0;
 
         if (is_reasoning) {
